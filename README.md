@@ -355,6 +355,23 @@ and the worker prompts' project prose are config, not code:
 
 Both sections are optional; omitting them preserves the values above.
 
+**Human Verify (operator-owned final gate):** add the `Human Verify` label to
+an LFG issue and the factory stops at Verification for YOU — no verify worker
+launches; the issue shows under *Needs you* on the board and the thread's
+**Approve** button (or typed `approve`) moves it to Done. Every earlier gate
+keeps its LFG auto-advance. Without the label, the verify worker resolves the
+gate itself (unchanged default).
+
+**Verification-feedback kickback:** while an issue sits in Verification, a
+free-text reply from an allowlisted operator in its Slack thread IS the
+verification verdict: the factory cancels any in-flight verify worker, posts
+your words as the next repair pass's handoff baton (verbatim, quoted), marks
+`Verification Failed`, moves the issue to Ready to Work, and launches the
+repair — no manual status surgery. Typed verbs (`approve`, `result`, …) still
+route as console commands, and plain Linear comments stay inert (they are
+world-writable; the Slack thread is operator-allowlisted). Replied by
+mistake? `approve` still passes the gate.
+
 **Deploy-gated phases resume on their own:** a worker that needs a build on
 the deployed stack records the ledger blocker `waiting-on-deploy` and ends its
 run — a legitimate ending (attempt settles Succeeded, never Failed, never an

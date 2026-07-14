@@ -57,6 +57,9 @@ import {
   type AnswerButtonValue,
 } from "./questions.js";
 import { relayAnswer, relayInboundMessage, RETRY_ANSWER_TEXT, type RelayDeps } from "./relay.js";
+import { handoffMarker } from "../phases/prompts.js";
+import { TERMINAL_ATTEMPT_STATES } from "../store/db.js";
+import { releaseDevLock } from "../sweep/locks.js";
 import {
   buildIssueStatus,
   formatIssueStatusLive,
@@ -71,6 +74,7 @@ import {
   type ThreadDeps,
   type ThreadRef,
 } from "./threads.js";
+import { humanReviewPending, VERIFICATION_STATES } from "../domain/statuses.js";
 
 /** Marker prefixes for daemon-authored comments (never the "question"). */
 const DAEMON_MARKER_PREFIXES = [
@@ -173,14 +177,8 @@ function factoryBlockReason(comment: LinearCommentSnapshot): string {
  * operator must act, so the wait warrants a thread. Every OTHER `wait`
  * (KTD-10 running attempt, duplicate-worker guard, quota cooldown, dev-lock) is
  * an internal/transient wait with no operator ask and MUST NOT enroll a thread.
- * Mirrors the sweep's REVIEW_GATE_STATES human-wait classification.
+ * Mirrors the sweep's human-wait classification (domain/statuses).
  */
-const REVIEW_GATE_STATES = new Set([
-  "Requirements Review",
-  "Plan Review",
-  "Verification",
-  "Review",
-]);
 
 /**
  * An issue should be ENROLLED (get a Slack thread) only when the daemon
@@ -211,8 +209,10 @@ function actionWarrantsThread(
     case "block":
       return true;
     case "wait":
-      return (
-        REVIEW_GATE_STATES.has(candidate.issue.state) && !candidate.hasLfg
+      return humanReviewPending(
+        candidate.issue.state,
+        candidate.issue.labels,
+        candidate.hasLfg,
       );
     case "noop":
       return false;
@@ -257,6 +257,106 @@ export interface SlackSyncDeps {
   github?: GithubGateway;
   /** Repo-scoped executors (release/deploy) — usable without an issue. */
   repoExecutors?: Partial<Record<ConsoleVerb, RepoExecutor>>;
+  /**
+   * Host transport for the verification-feedback kickback (kills a running
+   * verify worker before rerouting). Absent → the kickback still reroutes but
+   * cannot cancel an in-flight worker.
+   */
+  transport?: {
+    killPidGroup(pid: number): Promise<boolean>;
+  };
+}
+
+/**
+ * Verification-feedback kickback: cancel any in-flight verify worker, post the
+ * operator's feedback as the NEXT repair pass's trusted handoff baton, mark
+ * `Verification Failed` + move to Ready to Work (the engine's repair route),
+ * and ack in the thread. The operator's reply IS the failed-verification
+ * verdict — no manual status surgery.
+ */
+async function kickbackWithFeedback(
+  deps: SlackSyncDeps,
+  row: { issue_id: string; identifier: string },
+  message: { channel: string; threadTs: string | null; text: string; userId: string },
+): Promise<void> {
+  const id = row.identifier;
+
+  // 1. Cancel a running verify worker so its later writes (e.g. a Done move)
+  //    cannot override the operator's verdict. CanceledByReconciliation keeps
+  //    the cancellation OUT of the attempt-ceiling kill count.
+  try {
+    const newest = deps.store.listAttemptsForPhase(row.issue_id, "verify")[0];
+    if (
+      newest !== undefined &&
+      !(TERMINAL_ATTEMPT_STATES as readonly string[]).includes(newest.state)
+    ) {
+      if (newest.pid !== null && deps.transport !== undefined) {
+        await deps.transport.killPidGroup(newest.pid);
+      }
+      deps.store.transitionAttempt(
+        newest.id,
+        "CanceledByReconciliation",
+        `operator verification feedback kickback (by ${message.userId})`,
+      );
+      deps.store.deleteLease(row.issue_id);
+      releaseDevLock(deps.store, row.issue_id);
+    }
+  } catch (e) {
+    deps.log.warn("kickback: verify-worker cancel failed — continuing", {
+      issue: id,
+      error: String(e),
+    });
+  }
+
+  // 2. The operator's words become the repair contract: a daemon-authored
+  //    (trusted) Ready to Work baton the relaunched worker reads first.
+  const baton = [
+    handoffMarker(id, "Ready to Work"),
+    "",
+    `Goal: repair ${id} per the operator's verification feedback below, re-verify the affected scenarios, and hand back to Verification.`,
+    "",
+    "Operator verification feedback (verbatim, from the issue's Slack thread):",
+    "",
+    message.text
+      .split("\n")
+      .map((l) => `> ${l}`)
+      .join("\n"),
+    "",
+    "Start here: reproduce the reported problem, implement the smallest correct fix with a regression test, and re-run the plan's verification scenarios this touches.",
+  ].join("\n");
+
+  try {
+    await deps.gateway.createComment(row.issue_id, baton);
+    await deps.gateway.addLabel(row.issue_id, "Verification Failed");
+    await deps.gateway.setState(row.issue_id, "Ready to Work");
+  } catch (e) {
+    deps.log.error("kickback: Linear reroute failed", {
+      issue: id,
+      error: String(e),
+    });
+    if (message.threadTs !== null) {
+      await deps.slack
+        .postThreadReply(
+          message.channel,
+          message.threadTs,
+          `⚠️ Couldn't reroute ${id} (Linear write failed) — your feedback was NOT recorded. Try again in a moment.`,
+        )
+        .catch(() => {});
+    }
+    return;
+  }
+
+  if (message.threadTs !== null) {
+    await deps.slack
+      .postThreadReply(
+        message.channel,
+        message.threadTs,
+        `🔁 Verification feedback recorded — ${id} moved back to *Ready to Work* for a repair pass with your notes as the contract. (Meant to pass it instead? Type \`approve\`.)`,
+      )
+      .catch((e: unknown) =>
+        deps.log.warn("kickback: ack failed", { error: String(e) }),
+      );
+  }
 }
 
 export function createSlackSync(deps: SlackSyncDeps): SlackSync {
@@ -647,6 +747,35 @@ export function createSlackSync(deps: SlackSyncDeps): SlackSync {
               }),
             );
           return;
+        }
+      }
+      // Verification-feedback kickback: a trusted operator reply on an issue
+      // sitting at a Verification-family gate IS the verification verdict —
+      // reroute to a repair pass with the operator's words as the contract
+      // instead of answering with help text. (Plain Linear comments stay
+      // inert: they are world-writable; the Slack thread is allowlisted.)
+      if (message.threadTs !== null && deps.operatorUserIds.includes(message.userId)) {
+        const row = deps.store.getSlackThreadByThreadTs(
+          message.channel,
+          message.threadTs,
+        );
+        if (row !== undefined) {
+          let state: string | undefined;
+          try {
+            const [fresh] = await deps.gateway.getIssuesByIdentifier([
+              row.identifier,
+            ]);
+            state = fresh?.state;
+          } catch {
+            state = undefined; // Linear unreachable → fall through to relay
+          }
+          if (
+            state !== undefined &&
+            (VERIFICATION_STATES as readonly string[]).includes(state)
+          ) {
+            await kickbackWithFeedback(deps, row, message);
+            return;
+          }
         }
       }
       // Otherwise: the answer round-trip. When there is no open question the

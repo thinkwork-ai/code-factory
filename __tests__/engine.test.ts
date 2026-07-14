@@ -462,6 +462,35 @@ describe("block decisions", () => {
     expect(resumed.kind).toBe("launch");
   });
 
+  it("Human Verify holds the Verification gate for the operator even under LFG", () => {
+    const held = decideAction(
+      makeCandidate({
+        state: "Verification",
+        labels: ["Claude", "LFG", "Human Verify"],
+      }),
+      emptyView(),
+    );
+    expect(held.kind).toBe("wait");
+    expect((held as { reason: string }).reason).toContain("Human Verify");
+
+    // Without the label, LFG still auto-verifies (default unchanged).
+    const auto = decideAction(
+      makeCandidate({ state: "Verification", labels: ["Claude", "LFG"] }),
+      emptyView(),
+    );
+    expect(auto.kind).toBe("launch");
+
+    // Earlier gates keep their LFG auto-advance even WITH the label.
+    const earlier = decideAction(
+      makeCandidate({
+        state: "Plan Review",
+        labels: ["Claude", "LFG", "Human Verify"],
+      }),
+      emptyView(),
+    );
+    expect(earlier.kind).toBe("advance");
+  });
+
   it("waiting-on-deploy gate NOT cleared → quiet wait; cleared → proceeds", () => {
     const waiting = decideAction(
       makeCandidate({ state: "Verification", labels: ["Claude", "LFG"] }),

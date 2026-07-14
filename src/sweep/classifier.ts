@@ -32,18 +32,12 @@ import type { HostTransport } from "../workers/transport.js";
 import { evaluateLiveness, renewLease, type LivenessVerdict } from "./leases.js";
 import { classifyQuota, DEFAULT_QUOTA_COOLDOWN_MINUTES } from "./quota.js";
 import { armNag, disarmNag, sweepNags, type FiredNag } from "./nags.js";
+import { humanReviewPending } from "../domain/statuses.js";
 
 /** Lines of the worker log tail preserved to the ledger on a stall. */
 const STALL_TAIL_LINES = 40;
 
 /** Human-wait / blocker classification for a candidate with no active worker. */
-const REVIEW_GATE_STATES = new Set([
-  "Requirements Review",
-  "Plan Review",
-  "Verification",
-  "Review",
-]);
-
 export type SweepStateKind =
   | "leased"
   | "host-unreachable"
@@ -256,8 +250,15 @@ function classifyIdle(
     };
   }
 
-  // Review gate without LFG is a supervised human-wait: arm the review nag.
-  if (REVIEW_GATE_STATES.has(candidate.issue.state) && !candidate.hasLfg) {
+  // Review gate waiting on a human (no LFG, or Human Verify at the final
+  // gate) is a supervised human-wait: arm the review nag.
+  if (
+    humanReviewPending(
+      candidate.issue.state,
+      candidate.issue.labels,
+      candidate.hasLfg,
+    )
+  ) {
     armNag({ store: deps.store, issueId, kind: "review-gate", now });
     return { issue: id, kind: "human-wait", detail: "review-gate" };
   }
