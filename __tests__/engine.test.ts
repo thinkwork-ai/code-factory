@@ -462,6 +462,21 @@ describe("block decisions", () => {
     expect(resumed.kind).toBe("launch");
   });
 
+  it("waiting-on-deploy gate NOT cleared → quiet wait; cleared → proceeds", () => {
+    const waiting = decideAction(
+      makeCandidate({ state: "Verification", labels: ["Claude", "LFG"] }),
+      emptyView({ deployWait: { cleared: false } }),
+    );
+    expect(waiting.kind).toBe("wait");
+    expect((waiting as { reason: string }).reason).toContain("waiting-on-deploy");
+
+    const resumed = decideAction(
+      makeCandidate({ state: "Verification", labels: ["Claude", "LFG"] }),
+      emptyView({ deployWait: { cleared: true } }),
+    );
+    expect(resumed.kind).toBe("launch");
+  });
+
   it("block decisions are idempotent — same inputs, identical action", () => {
     const candidate = makeCandidate({
       state: "Ready to Work",

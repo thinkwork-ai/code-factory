@@ -237,3 +237,27 @@ describe("parseWaitingOn", () => {
     expect(parsed.warnings.filter((w) => w.includes("unknown blocker"))).toEqual([]);
   });
 });
+
+describe("isDeployWaitBlocker", () => {
+  it("matches waiting-on-deploy with or without trailing text; rejects others", async () => {
+    const { isDeployWaitBlocker } = await import("../src/linear/ledger.js");
+    expect(isDeployWaitBlocker("waiting-on-deploy")).toBe(true);
+    expect(isDeployWaitBlocker("  Waiting-On-Deploy: needs canary.358 ")).toBe(true);
+    expect(isDeployWaitBlocker("waiting-on THINK-273")).toBe(false);
+    expect(isDeployWaitBlocker("waiting-on-deployment-x")).toBe(false);
+    expect(isDeployWaitBlocker(null)).toBe(false);
+  });
+
+  it("waiting-on-deploy is a KNOWN ledger blocker (no warning)", async () => {
+    const { parseLedgerComment, renderLedgerComment, DEFAULT_LEDGER } =
+      await import("../src/linear/ledger.js");
+    const body = renderLedgerComment(
+      "THINK-285",
+      { ...DEFAULT_LEDGER, blocker: "waiting-on-deploy" },
+      "",
+    );
+    const parsed = parseLedgerComment("THINK-285", body);
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.ledger.blocker).toBe("waiting-on-deploy");
+  });
+});

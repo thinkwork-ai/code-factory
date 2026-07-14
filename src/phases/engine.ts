@@ -160,6 +160,16 @@ export interface StoreView {
    */
   dependency?: { identifier: string; state: string; done: boolean } | null;
   /**
+   * Deploy-gate wait from the ledger blocker `waiting-on-deploy` (resolved
+   * live by buildStoreView via the deploy-gate checker). `cleared` → the
+   * engine proceeds (the relaunched worker re-checks the deployed build and
+   * clears the blocker); otherwise it WAITS quietly — never a Failed attempt,
+   * never Needs User (the THINK-285 hot-loop: an unknown blocker fell through
+   * to relaunch, and every relaunch burned a Failed attempt into the
+   * escalation counter). null/absent when the blocker is not a deploy wait.
+   */
+  deployWait?: { cleared: boolean } | null;
+  /**
    * Worker evidence found OUTSIDE the store (stray pids, worktrees, recorded
    * Codex thread ids). Non-empty → never launch; wait for reconciliation.
    */
@@ -397,6 +407,20 @@ export function decideAction(
     return {
       kind: "wait",
       reason: `${id} is waiting on ${view.dependency.identifier} (currently ${view.dependency.state}) — resumes automatically when it reaches Done`,
+    };
+  }
+
+  // Deploy-gate wait (`waiting-on-deploy` ledger blocker): the worker needs a
+  // build containing the merged work on the deployed stack. Wait QUIETLY until
+  // the deploy-gate checker sees a release tag newer than the wait whose
+  // deploy run succeeded, then fall through and relaunch — the resumed worker
+  // re-checks the deployed build and clears the blocker. A missing checker
+  // (view.deployWait null with the blocker set is normalized upstream) or an
+  // uncleared gate both wait — never a Failed attempt, never Needs User.
+  if (!isDone && view.deployWait != null && !view.deployWait.cleared) {
+    return {
+      kind: "wait",
+      reason: `${id} is waiting on a release deploy (ledger blocker "waiting-on-deploy") — resumes automatically when a newer release tag's deploy run succeeds`,
     };
   }
 

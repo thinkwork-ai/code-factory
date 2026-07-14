@@ -196,7 +196,8 @@ function coerceLedger(
     out.blocker = raw.blocker;
     if (
       !(BLOCKER_LABELS as readonly string[]).includes(raw.blocker) &&
-      parseWaitingOn(raw.blocker) === null
+      parseWaitingOn(raw.blocker) === null &&
+      !isDeployWaitBlocker(raw.blocker)
     )
       warnings.push(`unknown blocker: ${raw.blocker}`);
   } else {
@@ -305,4 +306,19 @@ export function parseWaitingOn(blocker: string | null | undefined): string | nul
   if (blocker == null) return null;
   const m = /^waiting-on:?\s+([A-Za-z]+-\d+)\b/i.exec(blocker.trim());
   return m ? m[1].toUpperCase() : null;
+}
+
+/**
+ * Deploy-gate blocker: a worker (usually verify) that needs a build
+ * containing the merged work on the deployed stack records
+ * `waiting-on-deploy` and ends its run. Same doctrine as `waiting-on THINK-x`:
+ * a legitimate ending — the engine waits quietly and relaunches when the
+ * deploy-gate checker sees a newer release tag whose deploy run succeeded.
+ * Trailing free text is allowed (`waiting-on-deploy: needs canary.358`).
+ */
+export function isDeployWaitBlocker(
+  blocker: string | null | undefined,
+): boolean {
+  if (blocker == null) return false;
+  return /^waiting-on-deploy\b/i.test(blocker.trim());
 }

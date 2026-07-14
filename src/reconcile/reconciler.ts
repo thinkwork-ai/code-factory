@@ -186,6 +186,16 @@ function storeIsEmpty(store: FactoryStore): boolean {
 /** The post-completion status a phase advances an issue to, honoring a verify
  * fail rebound. Null when the phase has no forward status (compound). */
 function advanceTargetFor(phase: Phase, evidence: PhaseEvidence): string | null {
+  // Wait evidence is a legitimate ENDING, not a completion — the issue stays
+  // where it is and the engine resumes the phase when the gate clears.
+  // Advancing on it would mark a deploy-gated verify Done without a single
+  // check having run.
+  if (
+    evidence.complete &&
+    (evidence.kind === "dependency-wait" || evidence.kind === "deploy-wait")
+  ) {
+    return null;
+  }
   if (evidence.complete && phase === "verify") {
     return evidence.outcome === "fail" ? "Ready to Work" : "Done";
   }
@@ -221,6 +231,14 @@ async function reconcileOrphan(
       const [fresh] = await deps.gateway.getIssuesByIdentifier([identifier]);
       currentStatus = fresh?.state ?? issueRow.state;
       const comments = await deps.gateway.listComments(attempt.issue_id);
+      // Fresh ledger: wait blockers (`waiting-on THINK-x`, `waiting-on-deploy`)
+      // recorded by the dead worker are legitimate endings the reconciler must
+      // adopt as such — without them, a reboot during a wait expired the
+      // attempt and relaunched a worker straight back into the same gate.
+      const ledger = parseLedgerComment(
+        identifier,
+        findLedgerComment(identifier, comments)?.body,
+      );
       evidence = await detectPhaseEvidence({
         phase,
         issueIdentifier: identifier,
@@ -229,6 +247,14 @@ async function reconcileOrphan(
         statusAtLaunch: PHASE_HANDOFF[phase].reads,
         currentStatus,
         comments,
+        // The reconciler has no launch-time comment-id set (that lives in the
+        // dead daemon's memory), so gate baton adoption on comment TIME: only
+        // batons posted after this attempt started count. Without the floor, a
+        // reboot-killed verify attempt adopted the planning phase's hours-old
+        // `Ready to Work` baton and teleported the issue backward (THINK-285).
+        batonsNewerThan: attempt.started_at,
+        ledgerBlocker: ledger.ledger.blocker,
+        ledgerCompounded: ledger.ledger.compounded,
         branch: attempt.branch ?? undefined,
         github: deps.github,
         trust: deps.trust,
