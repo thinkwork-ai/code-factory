@@ -25,6 +25,7 @@ import {
   runDaemon,
   type DaemonDeps,
 } from "./daemon.js";
+import { createDeployGateCheck } from "./deploy-gate.js";
 import { formatDoctorReport, runDoctor } from "./doctor.js";
 import { heartbeatPath } from "./heartbeat.js";
 import { reconcile, type ReconcileDeps } from "./reconcile/reconciler.js";
@@ -315,6 +316,14 @@ program
       // U6 no-orphan sweep wiring.
       silenceBudgetMinutesFor,
       deliverNag,
+      // Deploy-gate checker: lets `waiting-on-deploy` phases resume on their
+      // own once a newer release tag's deploy run succeeds.
+      deployGateCleared: createDeployGateCheck({
+        transport,
+        repoPath: host.repoPath,
+        release: config.release,
+        log: log.child("deploy-gate"),
+      }),
       // U7 reboot/crash survival wiring.
       heartbeatPath: heartbeatPath(stateDir),
       reconcile: onlyIssues ? undefined : () => reconcile(reconcileDeps),

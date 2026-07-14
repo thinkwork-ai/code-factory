@@ -696,10 +696,12 @@ async function runLaunch(
         lane: candidate.lane ?? freshParsed.ledger.lane,
         worker: null,
         attempt: plan.attemptNumber,
-        // A dependency-wait run's whole point is the `waiting-on:` blocker —
-        // clearing it would relaunch immediately and re-hit the gate forever.
+        // A wait run's whole point is its blocker (`waiting-on:` /
+        // `waiting-on-deploy`) — clearing it would relaunch immediately and
+        // re-hit the gate forever.
         blocker:
-          completed.kind === "dependency-wait"
+          completed.kind === "dependency-wait" ||
+          completed.kind === "deploy-wait"
             ? freshParsed.ledger.blocker
             : null,
         compounded:

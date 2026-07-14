@@ -37,7 +37,7 @@ import type { FiredNag } from "./sweep/nags.js";
 import type { SlackSync } from "./slack/sync.js";
 import { runUnenrollPass } from "./reconcile/unenroll.js";
 import { writeHeartbeat } from "./heartbeat.js";
-import { parseWaitingOn } from "./linear/ledger.js";
+import { isDeployWaitBlocker, parseWaitingOn } from "./linear/ledger.js";
 
 /** Trailing terminal states that count as a "kill" for the attempt ceiling. */
 const KILL_TERMINALS = new Set(["Stalled", "TimedOut", "Failed"]);
@@ -117,6 +117,14 @@ export interface DaemonDeps {
    * enqueue to the store outbox for U8 to flush.
    */
   deliverNag?: (nag: FiredNag) => Promise<void>;
+  /**
+   * Deploy-gate checker for `waiting-on-deploy` ledger blockers: true when a
+   * release tag created AFTER `sinceIso` has a successful deploy run, so the
+   * gated phase can relaunch. Absent → deploy waits never self-clear (the
+   * engine waits quietly; an operator release + the checker-wired daemon is
+   * the normal path). cli.ts wires createDeployGateCheck.
+   */
+  deployGateCleared?: (sinceIso: string) => Promise<boolean>;
 
   // ---- U7 reboot/crash survival wiring (all optional) ---------------------
   /**
@@ -252,7 +260,13 @@ function worktreeKnown(store: FactoryStore, path: string): boolean {
 export async function buildStoreView(
   deps: Pick<
     DaemonDeps,
-    "gateway" | "store" | "transport" | "repoPath" | "now" | "quotaCooldownMinutes"
+    | "gateway"
+    | "store"
+    | "transport"
+    | "repoPath"
+    | "now"
+    | "quotaCooldownMinutes"
+    | "deployGateCleared"
   >,
   candidate: PollCandidate,
 ): Promise<StoreView> {
@@ -319,6 +333,32 @@ export async function buildStoreView(
 
   // Cross-issue dependency (`waiting-on: THINK-x` ledger blocker): resolve the
   // dependency's live state so the engine can wait/resume without a human.
+  // Deploy-gate wait (`waiting-on-deploy` ledger blocker): resolve whether a
+  // release newer than the wait has finished deploying. The floor is the
+  // newest attempt's start for the phase this status would relaunch — any
+  // release tag cut after that verify started necessarily contains the work
+  // it needs (the merge preceded the verify launch). No checker wired, or no
+  // prior attempt → not cleared (fail-safe quiet wait, never a hot relaunch).
+  let deployWait: StoreView["deployWait"] = null;
+  if (isDeployWaitBlocker(candidate.ledger.ledger.blocker)) {
+    let cleared = false;
+    if (deps.deployGateCleared !== undefined) {
+      const phaseForWait = phaseForStatus(issue.state);
+      const newest =
+        phaseForWait !== null
+          ? deps.store.listAttemptsForPhase(issue.id, phaseForWait)[0]
+          : undefined;
+      if (newest !== undefined) {
+        try {
+          cleared = await deps.deployGateCleared(newest.started_at);
+        } catch {
+          cleared = false; // unreachable git/gh → keep waiting, never hot-loop
+        }
+      }
+    }
+    deployWait = { cleared };
+  }
+
   let dependency: StoreView["dependency"] = null;
   const waitingOn = parseWaitingOn(candidate.ledger.ledger.blocker);
   if (waitingOn !== null) {
@@ -367,6 +407,7 @@ export async function buildStoreView(
     hasChildIssues,
     childStates,
     dependency,
+    deployWait,
     externalWorkerSignals,
     quota,
     consecutiveKillsByPhase,

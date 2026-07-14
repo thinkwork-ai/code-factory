@@ -355,6 +355,17 @@ and the worker prompts' project prose are config, not code:
 
 Both sections are optional; omitting them preserves the values above.
 
+**Deploy-gated phases resume on their own:** a worker that needs a build on
+the deployed stack records the ledger blocker `waiting-on-deploy` and ends its
+run — a legitimate ending (attempt settles Succeeded, never Failed, never an
+escalation). The daemon then waits quietly and re-checks (cached, ~5 min)
+whether a release tag newer than the wait — matching the scheme's deploy tag
+template (the last `extraTagTemplates` entry, else `tagTemplate`) — has a
+successful GitHub Actions run. When it does, the phase relaunches
+automatically; the resumed worker re-verifies against the fresh build and
+clears the blocker. The operator's only job is cutting the release
+(`release` → Confirm).
+
 ---
 
 ## Operating the daemon

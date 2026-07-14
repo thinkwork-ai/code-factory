@@ -344,3 +344,85 @@ describe("dependency-wait evidence", () => {
     expect(evidence.complete).toBe(false);
   });
 });
+
+describe("deploy-wait evidence", () => {
+  it("a waiting-on-deploy ledger blocker is a LEGITIMATE ending (complete, kind deploy-wait)", async () => {
+    const { detectPhaseEvidence } = await import("../src/phases/evidence.js");
+    const evidence = await detectPhaseEvidence({
+      phase: "verify",
+      issueIdentifier: "THINK-285",
+      statusAtLaunch: "Verification",
+      currentStatus: "Verification",
+      comments: [],
+      ledgerBlocker: "waiting-on-deploy",
+    });
+    expect(evidence.complete).toBe(true);
+    expect((evidence as { kind: string }).kind).toBe("deploy-wait");
+  });
+
+  it("trailing free text after waiting-on-deploy still matches", async () => {
+    const { detectPhaseEvidence } = await import("../src/phases/evidence.js");
+    const evidence = await detectPhaseEvidence({
+      phase: "verify",
+      issueIdentifier: "THINK-285",
+      statusAtLaunch: "Verification",
+      currentStatus: "Verification",
+      comments: [],
+      ledgerBlocker: "waiting-on-deploy: needs canary.358 on dev",
+    });
+    expect(evidence.complete).toBe(true);
+    expect((evidence as { kind: string }).kind).toBe("deploy-wait");
+  });
+
+  it("real progress evidence WINS over the deploy-wait blocker", async () => {
+    const { detectPhaseEvidence } = await import("../src/phases/evidence.js");
+    const evidence = await detectPhaseEvidence({
+      phase: "verify",
+      issueIdentifier: "THINK-285",
+      statusAtLaunch: "Verification",
+      currentStatus: "Done",
+      comments: [],
+      ledgerBlocker: "waiting-on-deploy",
+    });
+    expect(evidence.complete).toBe(true);
+    expect((evidence as { kind: string }).kind).toBe("status-moved");
+  });
+});
+
+describe("batonsNewerThan floor", () => {
+  it("excludes batons at or before the floor and comments without createdAt", async () => {
+    const { detectPhaseEvidence } = await import("../src/phases/evidence.js");
+    const base = {
+      phase: "verify" as const,
+      issueIdentifier: "THINK-285",
+      statusAtLaunch: "Verification",
+      currentStatus: "Verification",
+      batonsNewerThan: "2026-07-14T11:21:00.000Z",
+    };
+    const stale = await detectPhaseEvidence({
+      ...base,
+      comments: [
+        {
+          id: "c1",
+          body: "handoff:THINK-285:Ready to Work\n\nold plan baton",
+          createdAt: "2026-07-14T02:30:00.000Z",
+        },
+        { id: "c2", body: "handoff:THINK-285:Done\n\nundated" },
+      ],
+    });
+    expect(stale.complete).toBe(false);
+
+    const fresh = await detectPhaseEvidence({
+      ...base,
+      comments: [
+        {
+          id: "c3",
+          body: "handoff:THINK-285:Done\n\nfresh baton",
+          createdAt: "2026-07-14T12:00:00.000Z",
+        },
+      ],
+    });
+    expect(fresh.complete).toBe(true);
+    expect((fresh as { kind: string }).kind).toBe("baton-posted");
+  });
+});

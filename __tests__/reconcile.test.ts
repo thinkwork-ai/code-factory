@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createLogger, type Logger } from "../src/logger.js";
+import { DEFAULT_LEDGER, renderLedgerComment } from "../src/linear/ledger.js";
 import {
   reconcile,
   LAUNCH_RECORDING_FAILED_PREFIX,
@@ -515,5 +516,126 @@ describe("empty-store rebuild", () => {
 
     const res = await reconcile(deps(gateway, new ReconcileTransport()));
     expect(res.rebuiltIssues).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (g) baton freshness: a dead attempt never adopts a baton older than itself
+// (live THINK-285: a reboot-killed verify attempt adopted the PLANNING
+// phase's hours-old `Ready to Work` baton and teleported the issue backward)
+// ---------------------------------------------------------------------------
+
+describe("baton-freshness on adoption (THINK-285 regression)", () => {
+  it("a baton posted BEFORE the attempt started is NOT adopted — orphan expires instead", async () => {
+    const issue = makeIssue({
+      identifier: "THINK-285",
+      state: "Verification",
+      comments: [
+        {
+          id: "c-stale",
+          body: "handoff:THINK-285:Ready to Work\n\nGoal: plan handoff from hours ago.",
+          createdAt: "2026-07-11T02:30:00.000Z", // BEFORE started_at (clockNow)
+        },
+      ],
+    });
+    const gateway = new FakeGateway([issue]);
+    upsertIssueRow(issue.id, issue.identifier, issue.state);
+    const attemptId = store.insertAttempt({
+      issueId: issue.id,
+      phase: "verify",
+      attemptNumber: 1,
+      state: "Running", // no pid — reboot orphan
+    });
+
+    const res = await reconcile(deps(gateway, new ReconcileTransport()));
+
+    expect(store.getAttempt(attemptId)!.state).toBe("CanceledByReconciliation");
+    // The stale baton must NOT move the issue backward.
+    expect(
+      gateway.writes.filter((w) => w.op === "setState").length,
+    ).toBe(0);
+    expect(res.relaunchQueued).toContain("THINK-285");
+  });
+
+  it("a baton posted AFTER the attempt started IS adopted", async () => {
+    const issue = makeIssue({
+      identifier: "THINK-286",
+      state: "Verification",
+      comments: [
+        {
+          id: "c-fresh",
+          body: "handoff:THINK-286:Done\n\nGoal: verified, done.",
+          createdAt: "2026-07-12T01:00:00.000Z", // AFTER started_at (clockNow)
+        },
+      ],
+    });
+    const gateway = new FakeGateway([issue]);
+    upsertIssueRow(issue.id, issue.identifier, issue.state);
+    const attemptId = store.insertAttempt({
+      issueId: issue.id,
+      phase: "verify",
+      attemptNumber: 1,
+      state: "Running",
+    });
+
+    const res = await reconcile(deps(gateway, new ReconcileTransport()));
+
+    expect(store.getAttempt(attemptId)!.state).toBe("Succeeded");
+    expect(res.relaunchQueued).not.toContain("THINK-286");
+  });
+
+  it("a comment with NO createdAt fails the freshness floor (fail-safe: no adoption)", async () => {
+    const issue = makeIssue({
+      identifier: "THINK-287",
+      state: "Verification",
+      comments: [
+        { id: "c-undated", body: "handoff:THINK-287:Done\n\nGoal: undated." },
+      ],
+    });
+    const gateway = new FakeGateway([issue]);
+    upsertIssueRow(issue.id, issue.identifier, issue.state);
+    const attemptId = store.insertAttempt({
+      issueId: issue.id,
+      phase: "verify",
+      attemptNumber: 1,
+      state: "Running",
+    });
+
+    await reconcile(deps(gateway, new ReconcileTransport()));
+    expect(store.getAttempt(attemptId)!.state).toBe("CanceledByReconciliation");
+  });
+
+  it("deploy-wait evidence settles the orphan Succeeded WITHOUT advancing the issue", async () => {
+    const issue = makeIssue({
+      identifier: "THINK-288",
+      state: "Verification",
+      comments: [
+        {
+          id: "c-ledger",
+          body: renderLedgerComment(
+            "THINK-288",
+            { ...DEFAULT_LEDGER, phase: "verify", blocker: "waiting-on-deploy" },
+            "",
+          ),
+          createdAt: "2026-07-12T01:00:00.000Z",
+        },
+      ],
+    });
+    const gateway = new FakeGateway([issue]);
+    upsertIssueRow(issue.id, issue.identifier, issue.state);
+    const attemptId = store.insertAttempt({
+      issueId: issue.id,
+      phase: "verify",
+      attemptNumber: 1,
+      state: "Running",
+    });
+
+    const res = await reconcile(deps(gateway, new ReconcileTransport()));
+
+    expect(store.getAttempt(attemptId)!.state).toBe("Succeeded");
+    // Wait evidence never advances: NO setState (a deploy-gated verify must
+    // not be marked Done without a single check having run).
+    expect(gateway.writes.filter((w) => w.op === "setState").length).toBe(0);
+    expect(res.relaunchQueued).not.toContain("THINK-288");
   });
 });

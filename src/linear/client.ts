@@ -54,6 +54,8 @@ export interface LinearIssueSnapshot {
 export interface LinearCommentSnapshot {
   id: string;
   body: string;
+  /** ISO creation time — baton-freshness floors compare against this. */
+  createdAt?: string;
   /** Web URL of the comment (deep link, e.g. for Slack question links). */
   url?: string | null;
   /**
@@ -408,12 +410,20 @@ export function createLinearGateway(apiKey: string): LinearGateway {
         (a, b) =>
           new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
       );
-      return comments.map((c) => ({
-        id: c.id,
-        body: c.body,
-        url: c.url ?? null,
-        authorId: c.userId ?? c.botActor?.id ?? null,
-      }));
+      return comments.map((c) => {
+        // Tolerant: an unparseable createdAt yields no timestamp (freshness
+        // floors then EXCLUDE the comment — fail-safe, never a crash).
+        const createdMs = new Date(c.createdAt).getTime();
+        return {
+          id: c.id,
+          body: c.body,
+          url: c.url ?? null,
+          authorId: c.userId ?? c.botActor?.id ?? null,
+          ...(Number.isFinite(createdMs)
+            ? { createdAt: new Date(createdMs).toISOString() }
+            : {}),
+        };
+      });
     },
 
     async createComment(issueId, body) {

@@ -24,7 +24,7 @@ import {
 import { isMarkerComment } from "../linear/markers.js";
 import type { Phase } from "./engine.js";
 import { handoffMarker } from "./prompts.js";
-import { parseWaitingOn } from "../linear/ledger.js";
+import { isDeployWaitBlocker, parseWaitingOn } from "../linear/ledger.js";
 
 // ---------------------------------------------------------------------------
 // GitHub gateway
@@ -259,7 +259,8 @@ export type PhaseEvidence =
         | "status-moved"
         | "pr-merged"
         | "compounded"
-        | "dependency-wait";
+        | "dependency-wait"
+        | "deploy-wait";
       detail: string;
       /** For verify: pass moved to Done, fail rebounded to Ready to Work. */
       outcome?: "pass" | "fail";
@@ -282,6 +283,16 @@ export interface EvidenceInput {
    * completes this attempt's phase.
    */
   commentIdsAtLaunch?: ReadonlySet<string>;
+  /**
+   * ISO timestamp floor for baton evidence — only comments created strictly
+   * AFTER this instant count. The reconciler passes the dead attempt's
+   * started_at (it has no launch-time comment-id set to compare against):
+   * without it, a reboot-killed verify attempt adopted the PLANNING phase's
+   * hours-old `handoff:<ID>:Ready to Work` baton as its completion and
+   * teleported the issue backward in the pipeline (live THINK-285). A comment
+   * with no createdAt fails the floor (fail-safe: no adoption).
+   */
+  batonsNewerThan?: string;
   /** Rolling-ledger compounded flag (compound-phase completion signal). */
   ledgerCompounded?: boolean;
   /**
@@ -343,9 +354,17 @@ export async function detectPhaseEvidence(
   }
 
   // 2. Baton posted since launch.
-  const newComments = input.commentIdsAtLaunch
+  let newComments = input.commentIdsAtLaunch
     ? input.comments.filter((c) => !input.commentIdsAtLaunch!.has(c.id))
     : input.comments;
+  if (input.batonsNewerThan !== undefined) {
+    const floor = new Date(input.batonsNewerThan).getTime();
+    newComments = newComments.filter(
+      (c) =>
+        c.createdAt !== undefined &&
+        new Date(c.createdAt).getTime() > floor,
+    );
+  }
   for (const status of spec.batonStatuses) {
     const marker = handoffMarker(id, status);
     const match = newComments.find(
@@ -392,6 +411,19 @@ export async function detectPhaseEvidence(
       complete: true,
       kind: "dependency-wait",
       detail: `waiting on ${waitingOn} (ledger blocker) — engine resumes this phase when it reaches Done`,
+    };
+  }
+
+  // 5. Deploy-gate wait: the worker recorded `waiting-on-deploy` and ended
+  //    its run — a legitimate ending, same doctrine as the dependency wait.
+  //    The engine waits and relaunches when a newer release tag's deploy run
+  //    succeeds. Without this, every deploy-gated verify burned a Failed
+  //    attempt and two of them escalated Needs User (live THINK-285).
+  if (isDeployWaitBlocker(input.ledgerBlocker)) {
+    return {
+      complete: true,
+      kind: "deploy-wait",
+      detail: `waiting on a release deploy (ledger blocker "waiting-on-deploy") — engine resumes this phase when a newer release tag's deploy run succeeds`,
     };
   }
 
