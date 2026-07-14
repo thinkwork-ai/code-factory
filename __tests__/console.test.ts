@@ -310,13 +310,14 @@ describe("the action pipeline (KTD2)", () => {
 
 describe("R4: help routing", () => {
   it("AE3: unknown text in a thread with NO open question lists state commands", async () => {
-    const issue = makeIssue({ identifier: "THINK-50", state: "Verification", labels: ["Claude"] });
+    // In Progress, not Verification: a free-text reply on a Verification
+    // issue is now the feedback KICKBACK, not a help lookup.
+    const issue = makeIssue({ identifier: "THINK-50", state: "In Progress", labels: ["Claude"] });
     const h = await enrolled(issue, {});
-    await typed(h, "merge it plz");
+    await typed(h, "some unknown text plz");
     const reply = lastReply(h);
     expect(reply).not.toContain("isn't waiting on an answer (no");
     expect(reply).toContain("commands:");
-    expect(reply).toContain("`approve`");
     expect(reply).toContain("`merge <pr#>`");
   });
 
@@ -1132,5 +1133,80 @@ describe("U10: doctor console-scope checks", () => {
     expect(pins.ok).toBe(false);
     expect(pins.detail).toContain("pins:read");
     expect(pins.detail).toContain("reinstall");
+  });
+});
+
+describe("verification-feedback kickback", () => {
+  it("a trusted free-text reply on a Verification issue reroutes to repair with the feedback as a baton", async () => {
+    const issue = makeIssue({
+      identifier: "THINK-60",
+      state: "Verification",
+      labels: ["Claude", "LFG"],
+    });
+    const h = await enrolled(issue, {});
+    // A running verify attempt exists — the kickback must cancel it.
+    const attemptId = store.insertAttempt({
+      issueId: issue.id,
+      phase: "verify",
+      attemptNumber: 1,
+      state: "Running",
+      pid: 777,
+    });
+
+    await typed(h, "The delete button still does nothing on Safari.");
+
+    // Attempt canceled (excluded from the kill ceiling), lease dropped.
+    expect(store.getAttempt(attemptId)!.state).toBe("CanceledByReconciliation");
+    // Feedback baton posted, trusted-authorable next repair contract.
+    const baton = h.gateway.issues[0].comments.find((c) =>
+      c.body.startsWith("handoff:THINK-60:Ready to Work"),
+    );
+    expect(baton).toBeDefined();
+    expect(baton!.body).toContain("> The delete button still does nothing on Safari.");
+    // Rerouted: Verification Failed + Ready to Work.
+    expect(h.gateway.writes).toContainEqual({
+      op: "addLabel",
+      args: [issue.id, "Verification Failed"],
+    });
+    expect(h.gateway.writes).toContainEqual({
+      op: "setState",
+      args: [issue.id, "Ready to Work"],
+    });
+    // Operator gets an ack naming the reroute + the approve escape hatch.
+    expect(lastReply(h)).toContain("repair pass");
+    expect(lastReply(h)).toContain("`approve`");
+  });
+
+  it("a NON-operator reply on a Verification issue does NOT kick back", async () => {
+    const issue = makeIssue({
+      identifier: "THINK-61",
+      state: "Verification",
+      labels: ["Claude"],
+    });
+    const h = await enrolled(issue, {});
+    await typed(h, "drive-by comment", "U-STRANGER");
+    expect(
+      h.gateway.writes.filter((w) => w.op === "setState").length,
+    ).toBe(0);
+  });
+
+  it("a typed VERB on a Verification issue is a console action, never a kickback", async () => {
+    const issue = makeIssue({
+      identifier: "THINK-62",
+      state: "Verification",
+      labels: ["Claude"],
+    });
+    let ran = false;
+    const h = await enrolled(issue, {
+      result: async () => {
+        ran = true;
+        return { text: "ran" };
+      },
+    });
+    await typed(h, "result");
+    expect(ran).toBe(true);
+    expect(
+      h.gateway.writes.filter((w) => w.op === "setState").length,
+    ).toBe(0);
   });
 });

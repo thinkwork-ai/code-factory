@@ -19,6 +19,15 @@ export type LaneLabel = (typeof LANE_LABELS)[number];
 export const LFG_LABEL = "LFG";
 
 /**
+ * Operator opt-in: an LFG issue carrying this label stops at the
+ * Verification-family gate for HUMAN verification (Approve → Done via the
+ * Slack console) instead of launching the automated verify worker. All
+ * earlier gates keep their LFG auto-advance — this scopes only the final
+ * quality gate to the human.
+ */
+export const HUMAN_VERIFY_LABEL = "Human Verify";
+
+/**
  * Blocker labels that stop automation (routing contract). Also the known
  * ledger `blocker` enum values (`null` in the ledger means unblocked).
  */
@@ -68,6 +77,34 @@ export type ActiveState = (typeof ACTIVE_STATES)[number];
 
 /** Verification-family states — enrolled regardless of lane label. */
 export const VERIFICATION_STATES = ["Verification", "Review"] as const;
+
+/**
+ * Review-gate states where an issue can sit waiting on a HUMAN. Shared by the
+ * board/sync/classifier "awaiting approval" surfaces and the nag sweep.
+ */
+export const REVIEW_GATE_STATES: ReadonlySet<string> = new Set([
+  "Requirements Review",
+  "Plan Review",
+  ...VERIFICATION_STATES,
+]);
+
+/**
+ * True when a review-gate issue is waiting on the operator: any gate without
+ * LFG, or a Verification-family gate with the `Human Verify` opt-in label
+ * (which scopes the FINAL gate to the human even under LFG).
+ */
+export function humanReviewPending(
+  state: string,
+  labels: readonly string[],
+  hasLfg: boolean,
+): boolean {
+  if (!REVIEW_GATE_STATES.has(state)) return false;
+  if (!hasLfg) return true;
+  return (
+    (VERIFICATION_STATES as readonly string[]).includes(state) &&
+    labels.includes(HUMAN_VERIFY_LABEL)
+  );
+}
 export type VerificationState = (typeof VERIFICATION_STATES)[number];
 
 /**

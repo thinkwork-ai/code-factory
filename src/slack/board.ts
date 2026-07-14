@@ -29,6 +29,7 @@ import {
 } from "./blocks.js";
 import type { SlackGateway } from "./client.js";
 import { formatElapsed } from "./console.js";
+import { humanReviewPending } from "../domain/statuses.js";
 
 /** meta key: the pinned board message, JSON `{channel, ts}`. */
 export const BOARD_MESSAGE_KEY = "board-message";
@@ -38,14 +39,6 @@ export const DONE_TODAY_KEY = "board-done-today";
 export const BOARD_RENDER_KEY = "board-last-render";
 
 const PAUSED_LABEL = "Paused";
-
-/** Review-gate states whose wait is a human-wait (mirrors sync.ts). */
-const REVIEW_GATE_STATES = new Set([
-  "Requirements Review",
-  "Plan Review",
-  "Verification",
-  "Review",
-]);
 
 /**
  * Record a completed issue into the done-today meta memory (called by the
@@ -169,7 +162,10 @@ export function buildBoardMessage(
       needsYou.push(row(blockers.join(", ")));
       continue;
     }
-    if (REVIEW_GATE_STATES.has(c.issue.state) && !c.hasLfg && !activeByIssue.has(c.issue.id)) {
+    if (
+      humanReviewPending(c.issue.state, c.issue.labels, c.hasLfg) &&
+      !activeByIssue.has(c.issue.id)
+    ) {
       needsYou.push(row(`${c.issue.state} — awaiting approval`));
       continue;
     }

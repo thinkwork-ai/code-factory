@@ -205,6 +205,7 @@ program
           slack: slackGateway,
           store,
           gateway,
+          transport,
           channelId: config.slack.channelId as string,
           operatorUserIds: config.slack.operatorUserIds ?? [],
           log: log.child("slack"),

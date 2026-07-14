@@ -14,7 +14,7 @@
  */
 
 import type { LaneLabel } from "../domain/statuses.js";
-import { ROUTING_STATUSES } from "../domain/statuses.js";
+import { HUMAN_VERIFY_LABEL, ROUTING_STATUSES } from "../domain/statuses.js";
 import {
   isTrustedComment,
   type CommentTrust,
@@ -560,6 +560,15 @@ function routeByStatus(candidate: EngineCandidate): EngineAction {
 
     case "Verification":
     case "Review":
+      // `Human Verify` scopes the final gate to the operator even under LFG:
+      // no verify worker launches; the console's Approve (→ Done) is the exit.
+      if (issue.labels.includes(HUMAN_VERIFY_LABEL)) {
+        return {
+          kind: "wait",
+          reason:
+            "Verification with Human Verify — waiting for the operator to verify and approve (zero SLA)",
+        };
+      }
       return hasLfg
         ? launch(candidate, requireLaunchPhase(issue.state))
         : {
