@@ -773,6 +773,20 @@ export function createSlackSync(deps: SlackSyncDeps): SlackSync {
             state !== undefined &&
             (VERIFICATION_STATES as readonly string[]).includes(state)
           ) {
+            // Substance guard: a bare one-word reply ("done", "ok", "nice")
+            // is an acknowledgment, not a verification verdict — kicking THINK-289
+            // back to repair off a literal "done" is how this clause earned
+            // its existence. Ask for substance instead of acting on it.
+            if (!message.text.trim().includes(" ")) {
+              await deps.slack
+                .postThreadReply(
+                  message.channel,
+                  message.threadTs,
+                  `That reads like an acknowledgment, so I didn't act on it. In a Verification thread: \`approve\` passes the gate; a sentence describing what's wrong sends it back for repair with your words as the contract.`,
+                )
+                .catch(() => {});
+              return;
+            }
             await kickbackWithFeedback(deps, row, message);
             return;
           }

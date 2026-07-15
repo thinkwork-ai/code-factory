@@ -1177,6 +1177,20 @@ describe("verification-feedback kickback", () => {
     expect(lastReply(h)).toContain("`approve`");
   });
 
+  it("a bare one-word reply ('done') is an ack, NOT a kickback", async () => {
+    const issue = makeIssue({
+      identifier: "THINK-63",
+      state: "Verification",
+      labels: ["Claude", "LFG"],
+    });
+    const h = await enrolled(issue, {});
+    await typed(h, "done");
+    expect(
+      h.gateway.writes.filter((w) => w.op === "setState").length,
+    ).toBe(0);
+    expect(lastReply(h)).toContain("didn't act on it");
+  });
+
   it("a NON-operator reply on a Verification issue does NOT kick back", async () => {
     const issue = makeIssue({
       identifier: "THINK-61",
