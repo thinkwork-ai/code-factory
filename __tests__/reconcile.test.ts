@@ -25,6 +25,7 @@ import {
   LAUNCH_RECORDING_FAILED_PREFIX,
   type ReconcileDeps,
 } from "../src/reconcile/reconciler.js";
+import { MID_LAUNCH_GRACE_MS } from "../src/reconcile/reconciler.js";
 import type { GithubGateway, PrInfo } from "../src/phases/evidence.js";
 import { openStore, type FactoryStore } from "../src/store/db.js";
 import { DEV_DEPLOYMENT_LOCK } from "../src/sweep/locks.js";
@@ -145,6 +146,7 @@ describe("orphaned attempt expiry (AE6)", () => {
       state: "Running",
     });
 
+    clockNow = new Date(clockNow.getTime() + MID_LAUNCH_GRACE_MS + 1000); // past the mid-launch grace
     const res = await reconcile(deps(gateway, new ReconcileTransport()));
 
     const attempt = store.getAttempt(attemptId)!;
@@ -371,6 +373,7 @@ describe("orphaned dev-deployment lock cleanup", () => {
     });
     store.acquireLock(DEV_DEPLOYMENT_LOCK, issue.id, clockNow.toISOString());
 
+    clockNow = new Date(clockNow.getTime() + MID_LAUNCH_GRACE_MS + 1000); // past the mid-launch grace
     await reconcile(deps(gateway, new ReconcileTransport()));
 
     expect(store.getLock(DEV_DEPLOYMENT_LOCK)).toBeUndefined();
@@ -547,6 +550,7 @@ describe("baton-freshness on adoption (THINK-285 regression)", () => {
       state: "Running", // no pid — reboot orphan
     });
 
+    clockNow = new Date(clockNow.getTime() + MID_LAUNCH_GRACE_MS + 1000); // past the mid-launch grace
     const res = await reconcile(deps(gateway, new ReconcileTransport()));
 
     expect(store.getAttempt(attemptId)!.state).toBe("CanceledByReconciliation");
@@ -578,6 +582,7 @@ describe("baton-freshness on adoption (THINK-285 regression)", () => {
       state: "Running",
     });
 
+    clockNow = new Date(clockNow.getTime() + MID_LAUNCH_GRACE_MS + 1000); // past the mid-launch grace
     const res = await reconcile(deps(gateway, new ReconcileTransport()));
 
     expect(store.getAttempt(attemptId)!.state).toBe("Succeeded");
@@ -601,6 +606,7 @@ describe("baton-freshness on adoption (THINK-285 regression)", () => {
       state: "Running",
     });
 
+    clockNow = new Date(clockNow.getTime() + MID_LAUNCH_GRACE_MS + 1000); // past the mid-launch grace
     await reconcile(deps(gateway, new ReconcileTransport()));
     expect(store.getAttempt(attemptId)!.state).toBe("CanceledByReconciliation");
   });
@@ -630,6 +636,7 @@ describe("baton-freshness on adoption (THINK-285 regression)", () => {
       state: "Running",
     });
 
+    clockNow = new Date(clockNow.getTime() + MID_LAUNCH_GRACE_MS + 1000); // past the mid-launch grace
     const res = await reconcile(deps(gateway, new ReconcileTransport()));
 
     expect(store.getAttempt(attemptId)!.state).toBe("Succeeded");
@@ -637,5 +644,47 @@ describe("baton-freshness on adoption (THINK-285 regression)", () => {
     // not be marked Done without a single check having run).
     expect(gateway.writes.filter((w) => w.op === "setState").length).toBe(0);
     expect(res.relaunchQueued).not.toContain("THINK-288");
+  });
+});
+
+describe("mid-launch grace (IllegalTransition race)", () => {
+  it("a YOUNG null-pid active attempt is skipped, not canceled", async () => {
+    const issue = makeIssue({ identifier: "THINK-90", state: "In Progress" });
+    const gateway = new FakeGateway([issue]);
+    upsertIssueRow(issue.id, issue.identifier, issue.state);
+    // insertAttempt stamps started_at = clockNow → age 0s: inside the grace.
+    const attemptId = store.insertAttempt({
+      issueId: issue.id,
+      phase: "implement",
+      attemptNumber: 1,
+      state: "BuildingPrompt",
+    });
+
+    const res = await reconcile(deps(gateway, new ReconcileTransport()));
+
+    expect(store.getAttempt(attemptId)!.state).toBe("BuildingPrompt");
+    expect(res.relaunchQueued).not.toContain("THINK-90");
+    expect(
+      res.outcomes.find((o) => o.attemptId === attemptId)?.kind,
+    ).toBe("skipped");
+  });
+
+  it("an OLD null-pid active attempt is still expired as an orphan", async () => {
+    const issue = makeIssue({ identifier: "THINK-91", state: "In Progress" });
+    const gateway = new FakeGateway([issue]);
+    upsertIssueRow(issue.id, issue.identifier, issue.state);
+    const attemptId = store.insertAttempt({
+      issueId: issue.id,
+      phase: "implement",
+      attemptNumber: 1,
+      state: "Running",
+    });
+    // Age the attempt past the grace by advancing the injected clock.
+    clockNow = new Date(clockNow.getTime() + MID_LAUNCH_GRACE_MS + 1000);
+
+    const res = await reconcile(deps(gateway, new ReconcileTransport()));
+
+    expect(store.getAttempt(attemptId)!.state).toBe("CanceledByReconciliation");
+    expect(res.relaunchQueued).toContain("THINK-91");
   });
 });
