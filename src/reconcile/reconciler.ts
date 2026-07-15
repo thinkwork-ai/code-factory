@@ -68,6 +68,15 @@ import type { HostTransport } from "../workers/transport.js";
  * but the post-run Linear write failed (see executor `launch-recording-failed`). */
 export const LAUNCH_RECORDING_FAILED_PREFIX = "launch-recording-failed";
 
+/**
+ * Grace for a null-pid active attempt during a PERIODIC reconcile pass: a
+ * live launch takes a few seconds between inserting the attempt row and
+ * recording the spawned pid; canceling inside that window kills a healthy
+ * launch mid-flight. 10 minutes comfortably covers the slowest launch while
+ * still catching genuine boot-orphans on the following pass.
+ */
+export const MID_LAUNCH_GRACE_MS = 10 * 60 * 1000;
+
 const KNOWN_PHASES = new Set<string>(Object.keys(PHASE_HANDOFF));
 
 export type ReconcileOutcomeKind =
@@ -369,8 +378,27 @@ async function reconcileActiveAttempt(
   const now = deps.now();
 
   // A null pid means the launch never got far enough to record a process. On a
-  // fresh boot that is a crash-orphan by definition (no worker to reattach to).
+  // fresh boot that is a crash-orphan by definition (no worker to reattach to)
+  // — but a PERIODIC reconcile pass runs concurrently with live ticks, and a
+  // just-launched attempt legitimately has no pid for a few seconds. Without a
+  // grace window the reconciler cancels the mid-launch attempt and the live
+  // launch continuation then crashes on
+  // `CanceledByReconciliation → BuildingPrompt` (live twice: attempts 59, 82).
+  // Young null-pid attempts are skipped; a real boot-orphan is caught by the
+  // next pass once it ages past the grace.
   if (attempt.pid === null) {
+    const ageMs = now.getTime() - new Date(attempt.started_at).getTime();
+    if (ageMs < MID_LAUNCH_GRACE_MS) {
+      return {
+        outcome: {
+          issue: identifier,
+          attemptId: attempt.id,
+          kind: "skipped",
+          detail: `mid-launch grace: null pid but only ${Math.round(ageMs / 1000)}s old`,
+        },
+        relaunch: false,
+      };
+    }
     return reconcileOrphan(deps, attempt);
   }
 
