@@ -30,6 +30,7 @@ import {
 import type { SlackGateway } from "./client.js";
 import { formatElapsed } from "./console.js";
 import { humanReviewPending } from "../domain/statuses.js";
+import { classifyQuota } from "../sweep/quota.js";
 
 /** meta key: the pinned board message, JSON `{channel, ts}`. */
 export const BOARD_MESSAGE_KEY = "board-message";
@@ -84,6 +85,8 @@ export interface BoardDeps {
   store: FactoryStore;
   channelId: string;
   log: Logger;
+  /** Quota backoff tiers (minutes) — mirrors the daemon's, for row rendering. */
+  quotaCooldownTiers?: readonly number[];
 }
 
 interface BoardRow {
@@ -110,6 +113,7 @@ export function buildBoardMessage(
   store: FactoryStore,
   permalinks: ReadonlyMap<string, string>,
   now: Date = new Date(),
+  quotaCooldownTiers?: readonly number[],
 ): ComposedMessage {
   const linearUrls = new Map(
     candidates.map((c) => [c.issue.id, c.issue.url ?? undefined]),
@@ -168,6 +172,19 @@ export function buildBoardMessage(
     ) {
       needsYou.push(row(`${c.issue.state} — awaiting approval`));
       continue;
+    }
+    // Quota cooldown: a paused-by-the-provider issue must be VISIBLE (it has
+    // no blocker label and no active worker, so nothing else would show it).
+    if (!activeByIssue.has(c.issue.id)) {
+      const quota = classifyQuota(store, c.issue.id, now, quotaCooldownTiers);
+      if (quota.kind === "cooldown") {
+        waiting.push(
+          row(
+            `quota cooldown until ${quota.until.toISOString().slice(11, 16)} UTC (hit ${quota.streak}/${quota.tierCount}) — \`resume all\` clears`,
+          ),
+        );
+        continue;
+      }
     }
     const ledgerBlocker = c.ledger.ledger.blocker;
     if (ledgerBlocker !== null && ledgerBlocker.trim() !== "") {
@@ -275,7 +292,13 @@ export function createBoardUpdater(deps: BoardDeps): {
   return {
     async updateBoard(candidates, now = new Date()) {
       const permalinks = await permalinksFor(candidates);
-      const message = buildBoardMessage(candidates, deps.store, permalinks, now);
+      const message = buildBoardMessage(
+        candidates,
+        deps.store,
+        permalinks,
+        now,
+        deps.quotaCooldownTiers,
+      );
       deps.store.setMeta(BOARD_RENDER_KEY, JSON.stringify(message));
 
       const raw = deps.store.getMeta(BOARD_MESSAGE_KEY);

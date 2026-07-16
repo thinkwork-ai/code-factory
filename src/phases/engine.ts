@@ -96,7 +96,15 @@ export type EngineAction =
     }
   | { kind: "advance"; toStatus: string; evidence: string }
   /** Review gates without LFG etc. — zero-SLA waiting; nags arrive in U6/U8. */
-  | { kind: "wait"; reason: string }
+  | {
+      kind: "wait";
+      reason: string;
+      /**
+       * Present when the wait is a quota cooldown: the Slack sync uses it to
+       * post a visible (deduped) cooldown note into the issue's thread.
+       */
+      quota?: { until: string; endedAt: string; streak: number; tierCount: number };
+    }
   | { kind: "block"; label: string; reason: string }
   | { kind: "noop"; reason: string };
 
@@ -175,12 +183,20 @@ export interface StoreView {
    */
   externalWorkerSignals?: string[];
   /**
-   * Quota-cooldown signal (U6, R14/AE8) from the newest terminal attempt. When
-   * the latest attempt is `QuotaCooldown`, `cooldown` (still inside the window)
-   * makes decide() wait; `expired` (window exceeded) makes it escalate rather
-   * than hammer a throttling provider with an immediate relaunch.
+   * Quota-cooldown signal (U6, R14/AE8) from the newest terminal attempts.
+   * When the latest attempt is `QuotaCooldown`, `cooldown` (still inside its
+   * tier's window) makes decide() wait; `exhausted` (every backoff tier waited
+   * out and quota still hit) makes it escalate rather than hammer a throttling
+   * provider. A window elapsing WITHIN the tier table classifies clear (no
+   * signal here) — the retry is just normal routing.
    */
-  quota?: { kind: "cooldown" | "expired"; until?: string } | null;
+  quota?: {
+    kind: "cooldown" | "exhausted";
+    until?: string;
+    endedAt?: string;
+    streak?: number;
+    tierCount?: number;
+  } | null;
   /**
    * Trailing consecutive kill/stall count per phase (U6, R15/AE5) from
    * MAX(attempt_number) downward. A phase at or above ATTEMPT_CEILING has its
@@ -435,22 +451,42 @@ export function decideAction(
   }
 
   // Quota cooldown (R14/AE8): the newest terminal attempt hit a provider
-  // rate-limit. Wait inside the window; escalate only once it is exceeded —
-  // never an immediate relaunch that hammers a throttling provider.
+  // rate-limit. Wait inside the tier's backoff window (retry follows
+  // automatically once it elapses); escalate only when every tier was waited
+  // out and quota still hit — never an immediate relaunch that hammers a
+  // throttling provider.
   if (view.quota?.kind === "cooldown") {
+    const q = view.quota;
+    const tier =
+      q.streak !== undefined && q.tierCount !== undefined
+        ? ` (hit ${q.streak}/${q.tierCount})`
+        : "";
     return {
       kind: "wait",
       reason: `latest attempt is in QuotaCooldown${
-        view.quota.until ? ` until ${view.quota.until}` : ""
-      } — waiting out the rate-limit window before retry (R14/AE8)`,
+        q.until ? ` until ${q.until}` : ""
+      }${tier} — retries automatically; \`resume\` in the Slack thread retries now (R14/AE8)`,
+      ...(q.until !== undefined &&
+      q.endedAt !== undefined &&
+      q.streak !== undefined &&
+      q.tierCount !== undefined
+        ? {
+            quota: {
+              until: q.until,
+              endedAt: q.endedAt,
+              streak: q.streak,
+              tierCount: q.tierCount,
+            },
+          }
+        : {}),
     };
   }
-  const quotaExpired = view.quota?.kind === "expired";
-  if (quotaExpired && !hasEscalationOverride(candidate)) {
+  const quotaExhausted = view.quota?.kind === "exhausted";
+  if (quotaExhausted && !hasEscalationOverride(candidate)) {
     return {
       kind: "block",
       label: "Needs User",
-      reason: `${id} exceeded its QuotaCooldown window without recovery — escalating instead of retrying (R14/AE8)`,
+      reason: `${id} hit the provider quota ${view.quota?.streak ?? "several"} times in a row — every cooldown tier is exhausted; fix the subscription, then \`resume\` in the Slack thread (R14/AE8)`,
     };
   }
 
@@ -492,7 +528,7 @@ export function decideAction(
     // (ceiling reached, or quota window expired). Mark it so the executor
     // consumes the block marker — the override is one-shot, so if this attempt
     // fails too the next tick re-escalates rather than relaunching forever.
-    if (atCeiling || quotaExpired) {
+    if (atCeiling || quotaExhausted) {
       return { ...action, consumesEscalationOverride: true };
     }
   }

@@ -263,3 +263,23 @@ describe("project + release config (THINK-287)", () => {
     expect(config.release.note).toBe("Ships the site.");
   });
 });
+
+describe("quota config (quota-tiers)", () => {
+  it("absent quota section → undefined (daemon uses built-in default tiers)", () => {
+    writeConfig(minimalConfig);
+    expect(loadConfig().quota).toBeUndefined();
+  });
+
+  it("parses cooldownMinutes, dropping non-positive/non-numeric entries", () => {
+    writeConfig({
+      ...minimalConfig,
+      quota: { cooldownMinutes: [5, 15, "30", 0, -2, "junk"] },
+    });
+    expect(loadConfig().quota).toEqual({ cooldownMinutes: [5, 15, 30] });
+  });
+
+  it("an all-invalid tier list is treated as absent", () => {
+    writeConfig({ ...minimalConfig, quota: { cooldownMinutes: ["x", -1] } });
+    expect(loadConfig().quota).toBeUndefined();
+  });
+});

@@ -911,3 +911,53 @@ describe("escalation content — links, no noise footer", () => {
     expect(mention.text).not.toContain("an answer is needed to resume");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Quota-cooldown note (quota-tiers): visible, deduped, resumable from Slack
+// ---------------------------------------------------------------------------
+
+describe("quota-cooldown note", () => {
+  const quotaWait = (endedAt: string): EngineAction => ({
+    kind: "wait",
+    reason: "quota cooldown",
+    quota: {
+      until: "2026-07-16T15:10:00.000Z",
+      endedAt,
+      streak: 2,
+      tierCount: 3,
+    },
+  });
+
+  it("a quota wait ENROLLS the issue and posts one cooldown note (deduped per attempt)", async () => {
+    const issue = makeIssue({ identifier: "THINK-306", state: "In Progress", labels: ["Claude"] });
+    const gateway = new FakeGateway([issue]);
+    const slack = new FakeSlackGateway();
+    const sync = makeSync(gateway, slack);
+
+    await sync.syncCandidate(candidateFor(issue), quotaWait("2026-07-16T14:40:00.000Z"));
+    expect(store.getSlackThreadByIssue(issue.id)).toBeDefined();
+    const notes = slack.posts.filter((p) => p.text.includes("hit the provider quota"));
+    expect(notes).toHaveLength(1);
+    expect(notes[0].text).toContain("hit 2/3");
+    expect(notes[0].text).toContain("resume");
+
+    // Same cooled attempt on later ticks → no re-post.
+    await sync.syncCandidate(candidateFor(issue), quotaWait("2026-07-16T14:40:00.000Z"));
+    expect(slack.posts.filter((p) => p.text.includes("hit the provider quota"))).toHaveLength(1);
+
+    // A NEW cooled attempt (different endedAt) → one more note.
+    await sync.syncCandidate(candidateFor(issue), quotaWait("2026-07-16T15:20:00.000Z"));
+    expect(slack.posts.filter((p) => p.text.includes("hit the provider quota"))).toHaveLength(2);
+  });
+
+  it("a plain wait without quota info still does not enroll", async () => {
+    const issue = makeIssue({ identifier: "THINK-307", state: "In Progress", labels: ["Claude"] });
+    const gateway = new FakeGateway([issue]);
+    const slack = new FakeSlackGateway();
+    const sync = makeSync(gateway, slack);
+
+    await sync.syncCandidate(candidateFor(issue), { kind: "wait", reason: "just waiting" });
+    expect(store.getSlackThreadByIssue(issue.id)).toBeUndefined();
+    expect(slack.posts).toHaveLength(0);
+  });
+});

@@ -108,8 +108,8 @@ export interface DaemonDeps {
   now?: () => Date;
   /** Per-phase silence budget for stall detection (default 10 min when absent). */
   silenceBudgetMinutesFor?: (phase: string) => number;
-  /** Quota cooldown window in minutes (default 30). */
-  quotaCooldownMinutes?: number;
+  /** Quota cooldown backoff tiers in minutes (default [5, 15, 30]). */
+  quotaCooldownTiers?: readonly number[];
   /** Lease TTL in minutes (default 15). */
   leaseTtlMinutes?: number;
   /**
@@ -162,7 +162,7 @@ async function runSweepIsolated(
       silenceBudgetMinutesFor:
         deps.silenceBudgetMinutesFor ??
         (() => DEFAULT_SILENCE_BUDGET_MINUTES),
-      quotaCooldownMinutes: deps.quotaCooldownMinutes,
+      quotaCooldownTiers: deps.quotaCooldownTiers,
       leaseTtlMinutes: deps.leaseTtlMinutes,
       log: deps.log,
       deliverNag: deps.deliverNag,
@@ -265,7 +265,7 @@ export async function buildStoreView(
     | "transport"
     | "repoPath"
     | "now"
-    | "quotaCooldownMinutes"
+    | "quotaCooldownTiers"
     | "deployGateCleared"
   >,
   candidate: PollCandidate,
@@ -380,13 +380,19 @@ export async function buildStoreView(
     deps.store,
     issue.id,
     now,
-    deps.quotaCooldownMinutes,
+    deps.quotaCooldownTiers,
   );
   const quota: StoreView["quota"] =
     quotaVerdict.kind === "cooldown"
-      ? { kind: "cooldown", until: quotaVerdict.until.toISOString() }
-      : quotaVerdict.kind === "expired"
-        ? { kind: "expired" }
+      ? {
+          kind: "cooldown",
+          until: quotaVerdict.until.toISOString(),
+          endedAt: quotaVerdict.endedAt.toISOString(),
+          streak: quotaVerdict.streak,
+          tierCount: quotaVerdict.tierCount,
+        }
+      : quotaVerdict.kind === "exhausted"
+        ? { kind: "exhausted", streak: quotaVerdict.streak }
         : null;
 
   // Trailing consecutive kill/stall count for the phase this status would
