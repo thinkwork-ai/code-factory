@@ -38,6 +38,7 @@ import {
   RETRY_ANSWER_TEXT,
 } from "./relay.js";
 import { buildIssueStatus } from "./status.js";
+import { quotaResumeKey, quotaResumeMarker } from "../sweep/quota.js";
 
 /** Action-id prefix for every console button (gateway filters on `factory-`). */
 export const CONSOLE_ACTION_PREFIX = "factory-console";
@@ -48,6 +49,7 @@ export type ConsoleVerb =
   | "retry"
   | "pause"
   | "resume"
+  | "resume-all"
   | "release"
   | "release-confirm"
   | "release-cancel"
@@ -64,6 +66,7 @@ export type ConsoleVerb =
  * required. Everything else needs a live issue thread.
  */
 export const REPO_VERBS: ReadonlySet<ConsoleVerb> = new Set([
+  "resume-all",
   "release",
   "release-confirm",
   "release-cancel",
@@ -101,6 +104,7 @@ export function parseVerb(text: string): ParsedVerb | null {
   if (merge) return { verb: "merge", ...(merge[1] ? { arg: merge[1] } : {}) };
   if (/^retry$/.test(t)) return { verb: "retry" };
   if (/^pause$/.test(t)) return { verb: "pause" };
+  if (/^resume\s+all$/.test(t)) return { verb: "resume-all" };
   if (/^resume$/.test(t)) return { verb: "resume" };
   if (/^release$/.test(t)) return { verb: "release" };
   const deploy = /^deploy(?:\s+(.+))?$/.exec(t);
@@ -134,7 +138,12 @@ const VERB_HELP: readonly VerbHelp[] = [
   { verb: "merge", usage: "`merge <pr#>`", blurb: "squash-merge a factory PR" },
   { verb: "retry", usage: "`retry`", blurb: "relaunch the current phase from its baton" },
   { verb: "pause", usage: "`pause`", blurb: "suspend automation on this issue" },
-  { verb: "resume", usage: "`resume`", blurb: "restore automation on this issue" },
+  { verb: "resume", usage: "`resume`", blurb: "restore automation on this issue (unpause + clear quota cooldown)" },
+  {
+    verb: "resume-all",
+    usage: "`resume all`",
+    blurb: "clear every quota cooldown (after fixing the subscription)",
+  },
   { verb: "release", usage: "`release`", blurb: "cut a web canary (confirm required)" },
 ];
 
@@ -579,6 +588,31 @@ export interface SteeringDeps {
   gateway: LinearGateway;
   store: FactoryStore;
   log: Logger;
+  /** Injected clock for the quota resume marker (tests fake it). */
+  now?: () => Date;
+}
+
+/**
+ * True when the issue's newest terminal attempt is a QuotaCooldown that the
+ * operator has not already resumed — i.e. `resume` has something to clear.
+ * Deliberately window-agnostic: stamping a marker over an already-elapsed
+ * window is harmless, and this must also clear an EXHAUSTED streak.
+ */
+function pendingQuotaCooldown(
+  store: FactoryStore,
+  issueId: string,
+): { endedAt: string | null } | null {
+  const latest = store.getLatestTerminalAttempt(issueId);
+  if (latest === undefined || latest.state !== "QuotaCooldown") return null;
+  const marker = quotaResumeMarker(store, issueId);
+  if (
+    marker !== null &&
+    latest.ended_at !== null &&
+    new Date(latest.ended_at).getTime() <= marker.getTime()
+  ) {
+    return null;
+  }
+  return { endedAt: latest.ended_at };
 }
 
 /** Human-short elapsed time, e.g. `1h40` / `12m` / `40s`. */
@@ -676,11 +710,76 @@ export function createSteeringExecutors(
     },
 
     resume: async (ctx) => {
-      if (!ctx.issue.labels.includes("Paused")) {
-        return { text: `${refOf(ctx.issue)} isn't paused — nothing to resume.` };
+      const paused = ctx.issue.labels.includes("Paused");
+      const cooling = pendingQuotaCooldown(deps.store, ctx.issueId);
+      if (!paused && cooling === null) {
+        return {
+          text: `${refOf(ctx.issue)} isn't paused and has no quota cooldown — nothing to resume.`,
+        };
       }
-      await deps.gateway.removeLabel(ctx.issueId, "Paused");
-      return { text: `▶️ Resumed — ${refOf(ctx.issue)} re-enters automation next tick.` };
+      const cleared: string[] = [];
+      if (paused) {
+        await deps.gateway.removeLabel(ctx.issueId, "Paused");
+        cleared.push("unpaused");
+      }
+      if (cooling !== null) {
+        // Stamp the resume marker: the quota classifier ignores attempts that
+        // settled at or before it, so the next tick retries with a fresh streak.
+        const now = (deps.now ?? (() => new Date()))();
+        deps.store.setMeta(quotaResumeKey(ctx.issueId), now.toISOString());
+        cleared.push("quota cooldown cleared");
+        // A quota-exhausted escalation applied `Needs User`; the operator's
+        // resume IS the answer, so lift it rather than leaving a dead block.
+        if (ctx.issue.labels.includes(NEEDS_USER_LABEL)) {
+          await deps.gateway.removeLabel(ctx.issueId, NEEDS_USER_LABEL);
+          cleared.push(`\`${NEEDS_USER_LABEL}\` removed`);
+        }
+      }
+      return {
+        text: `▶️ Resumed (${cleared.join(", ")}) — ${refOf(ctx.issue)} re-enters automation next tick.`,
+      };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Quota executors: `resume all` (repo-scoped)
+// ---------------------------------------------------------------------------
+
+export interface QuotaExecutorDeps {
+  store: FactoryStore;
+  log: Logger;
+  /** Injected clock for the resume markers (tests fake it). */
+  now?: () => Date;
+}
+
+/**
+ * `resume all` — the one-shot recovery after a subscription/quota fix: stamp a
+ * resume marker for EVERY issue whose newest terminal attempt is a not-yet-
+ * resumed QuotaCooldown, so the next tick retries them all. Repo-scoped: works
+ * from the channel root and any thread, no issue mapping needed.
+ */
+export function createQuotaExecutors(
+  deps: QuotaExecutorDeps,
+): Partial<Record<ConsoleVerb, RepoExecutor>> {
+  return {
+    "resume-all": async () => {
+      const now = (deps.now ?? (() => new Date()))();
+      const cooling = deps.store.listLatestQuotaCooldowns().filter((row) => {
+        const marker = quotaResumeMarker(deps.store, row.issue_id);
+        if (marker === null || row.ended_at === null) return true;
+        return new Date(row.ended_at).getTime() > marker.getTime();
+      });
+      if (cooling.length === 0) {
+        return { text: "No quota cooldowns to clear — everything is already running or waiting on something else." };
+      }
+      for (const row of cooling) {
+        deps.store.setMeta(quotaResumeKey(row.issue_id), now.toISOString());
+      }
+      const names = cooling.map((r) => `*${r.identifier}*`).join(", ");
+      return {
+        text: `▶️ Cleared ${cooling.length} quota cooldown${cooling.length === 1 ? "" : "s"} — ${names} retr${cooling.length === 1 ? "ies" : "y"} next tick.`,
+      };
     },
   };
 }

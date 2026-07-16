@@ -34,7 +34,7 @@ import { installFactoryd, uninstallFactoryd } from "./cli-install.js";
 import { createLinearGateway, type CommentTrust } from "./linear/client.js";
 import { createLogger } from "./logger.js";
 import { createSlackGateway, type SlackGateway } from "./slack/client.js";
-import { createInspectionExecutors, createMergeExecutor, createReleaseExecutors, createSteeringExecutors } from "./slack/console.js";
+import { createInspectionExecutors, createMergeExecutor, createQuotaExecutors, createReleaseExecutors, createSteeringExecutors } from "./slack/console.js";
 import { createDeployExecutors, resumeDeployWatches } from "./slack/deploy.js";
 import { createSlackSync, type SlackSync } from "./slack/sync.js";
 import { buildStatusView, formatStatusView } from "./slack/status.js";
@@ -210,6 +210,9 @@ program
           operatorUserIds: config.slack.operatorUserIds ?? [],
           log: log.child("slack"),
           trust,
+          ...(config.quota?.cooldownMinutes !== undefined
+            ? { quotaCooldownTiers: config.quota.cooldownMinutes }
+            : {}),
           consoleExecutors: {
             ...createSteeringExecutors({
               gateway,
@@ -243,6 +246,7 @@ program
               log: log.child("console"),
             }),
             ...createDeployExecutors(deployDeps),
+            ...createQuotaExecutors({ store, log: log.child("console") }),
           },
           github,
         });
@@ -317,6 +321,9 @@ program
       // U6 no-orphan sweep wiring.
       silenceBudgetMinutesFor,
       deliverNag,
+      ...(config.quota?.cooldownMinutes !== undefined
+        ? { quotaCooldownTiers: config.quota.cooldownMinutes }
+        : {}),
       // Deploy-gate checker: lets `waiting-on-deploy` phases resume on their
       // own once a newer release tag's deploy run succeeds.
       deployGateCleared: createDeployGateCheck({

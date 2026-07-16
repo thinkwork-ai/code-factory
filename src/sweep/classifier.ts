@@ -30,7 +30,7 @@ import { ATTEMPT_TRANSITIONS } from "../workers/attempts.js";
 import type { AttemptRow, FactoryStore } from "../store/db.js";
 import type { HostTransport } from "../workers/transport.js";
 import { evaluateLiveness, renewLease, type LivenessVerdict } from "./leases.js";
-import { classifyQuota, DEFAULT_QUOTA_COOLDOWN_MINUTES } from "./quota.js";
+import { classifyQuota, DEFAULT_QUOTA_COOLDOWN_TIERS } from "./quota.js";
 import { armNag, disarmNag, sweepNags, type FiredNag } from "./nags.js";
 import { humanReviewPending } from "../domain/statuses.js";
 
@@ -63,7 +63,7 @@ export interface SweepDeps {
   now: () => Date;
   /** Per-phase silence budget (ms is derived here from minutes). */
   silenceBudgetMinutesFor: (phase: string) => number;
-  quotaCooldownMinutes?: number;
+  quotaCooldownTiers?: readonly number[];
   leaseTtlMinutes?: number;
   log: Logger;
   /**
@@ -217,17 +217,17 @@ function classifyIdle(
     deps.store,
     issueId,
     now,
-    deps.quotaCooldownMinutes ?? DEFAULT_QUOTA_COOLDOWN_MINUTES,
+    deps.quotaCooldownTiers ?? DEFAULT_QUOTA_COOLDOWN_TIERS,
   );
   if (quota.kind === "cooldown") {
     return {
       issue: id,
       kind: "quota-cooldown",
-      detail: `until ${quota.until.toISOString()}`,
+      detail: `until ${quota.until.toISOString()} (hit ${quota.streak}/${quota.tierCount})`,
     };
   }
-  if (quota.kind === "expired") {
-    return { issue: id, kind: "quota-expired" };
+  if (quota.kind === "exhausted") {
+    return { issue: id, kind: "quota-expired", detail: `streak ${quota.streak}` };
   }
 
   const hasNeedsUser = candidate.blockerLabels.includes("Needs User");

@@ -209,6 +209,9 @@ function actionWarrantsThread(
     case "block":
       return true;
     case "wait":
+      // A quota cooldown must be VISIBLE — enroll so the cooldown note lands
+      // in a thread the operator can `resume` from.
+      if (action.quota !== undefined) return true;
       return humanReviewPending(
         candidate.issue.state,
         candidate.issue.labels,
@@ -265,6 +268,8 @@ export interface SlackSyncDeps {
   transport?: {
     killPidGroup(pid: number): Promise<boolean>;
   };
+  /** Quota backoff tiers (minutes) — mirrors the daemon's, for board rows. */
+  quotaCooldownTiers?: readonly number[];
 }
 
 /**
@@ -380,6 +385,7 @@ export function createSlackSync(deps: SlackSyncDeps): SlackSync {
     store: deps.store,
     channelId: deps.channelId,
     log: deps.log,
+    quotaCooldownTiers: deps.quotaCooldownTiers,
   });
   const consoleDeps: ConsoleDeps = {
     gateway: deps.gateway,
@@ -548,6 +554,32 @@ export function createSlackSync(deps: SlackSyncDeps): SlackSync {
     );
   }
 
+  /**
+   * Quota-cooldown note: when the engine is waiting out a rate-limit backoff
+   * window, post ONE visible line into the issue's thread (deduped per
+   * cooled-down attempt via meta `quota-note:<issueId>` = its ended_at) so the
+   * paused work is discoverable and resumable from Slack.
+   */
+  async function maybeQuotaNote(
+    candidate: PollCandidate,
+    action: EngineAction,
+    ref: ThreadRef,
+  ): Promise<void> {
+    if (action.kind !== "wait" || action.quota === undefined) return;
+    const noteKey = `quota-note:${candidate.issue.id}`;
+    if (deps.store.getMeta(noteKey) === action.quota.endedAt) return;
+    const link = issueRef(candidate.issue.identifier, candidate.issue.url);
+    const untilEpoch = Math.round(new Date(action.quota.until).getTime() / 1000);
+    const untilText = `<!date^${untilEpoch}^{time}|${action.quota.until}>`;
+    const text =
+      `⏳ ${link} hit the provider quota — cooling down until ${untilText} ` +
+      `(hit ${action.quota.streak}/${action.quota.tierCount}), then retries on its own. ` +
+      "Fixed the subscription? `resume` here retries this issue now; " +
+      "`resume all` at the channel root clears every cooldown.";
+    await postMilestone(ref, text, threadDeps, [section(text)]);
+    deps.store.setMeta(noteKey, action.quota.endedAt);
+  }
+
   return {
     async syncCandidate(candidate, action) {
       // Enroll (open/track a thread) ONLY when the daemon actually works this
@@ -565,6 +597,7 @@ export function createSlackSync(deps: SlackSyncDeps): SlackSync {
         return;
       }
       await maybeMilestone(candidate, action, ref);
+      await maybeQuotaNote(candidate, action, ref);
       await maybeMergedPrNote(candidate, ref);
     },
 

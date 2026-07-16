@@ -27,10 +27,12 @@ import type { GithubOps, PrDetail } from "../src/phases/evidence.js";
 import {
   createInspectionExecutors,
   createMergeExecutor,
+  createQuotaExecutors,
   createReleaseExecutors,
   newestImages,
   RELEASE_OFFER_KEY,
 } from "../src/slack/console.js";
+import { classifyQuota, quotaResumeMarker } from "../src/sweep/quota.js";
 import { LocalTransport } from "../src/workers/transport.js";
 import { mkdirSync, writeFileSync, utimesSync } from "node:fs";
 import { createSteeringExecutors, formatElapsed } from "../src/slack/console.js";
@@ -1222,5 +1224,69 @@ describe("verification-feedback kickback", () => {
     expect(
       h.gateway.writes.filter((w) => w.op === "setState").length,
     ).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Quota resume (quota-tiers): thread `resume` + repo `resume all`
+// ---------------------------------------------------------------------------
+
+describe("quota resume", () => {
+  function seedQuotaCooldown(issueId: string, identifier: string): void {
+    store.upsertIssue({
+      issueId,
+      identifier,
+      phase: "implement",
+      state: "In Progress",
+      lane: "Claude",
+    });
+    const id = store.insertAttempt({
+      issueId,
+      phase: "implement",
+      attemptNumber: 1,
+      state: "Running",
+    });
+    store.transitionAttempt(id, "QuotaCooldown", "provider rate-limit");
+  }
+
+  it("parseVerb: `resume all` is the repo-scoped resume-all verb", () => {
+    expect(parseVerb("resume all")).toEqual({ verb: "resume-all" });
+    expect(parseVerb("resume")).toEqual({ verb: "resume" });
+  });
+
+  it("`resume all` stamps a marker for every cooling issue; a second call finds nothing", async () => {
+    seedQuotaCooldown("uuid-QA-1", "THINK-901");
+    seedQuotaCooldown("uuid-QA-2", "THINK-902");
+    // The store stamps ended_at from the REAL clock here, so the marker must
+    // land after it — one minute of headroom keeps the test deterministic.
+    const now = new Date(Date.now() + 60_000);
+    const exec = createQuotaExecutors({ store, log, now: () => now })["resume-all"]!;
+    const ctx = {
+      channel: CHANNEL,
+      threadTs: null,
+      userId: OPERATOR,
+      post: async () => {},
+    };
+    const ack = await exec(ctx);
+    expect(ack.text).toContain("Cleared 2 quota cooldowns");
+    expect(ack.text).toContain("THINK-901");
+    expect(ack.text).toContain("THINK-902");
+    expect(quotaResumeMarker(store, "uuid-QA-1")?.toISOString()).toBe(now.toISOString());
+    expect(classifyQuota(store, "uuid-QA-1", now).kind).toBe("clear");
+    expect(classifyQuota(store, "uuid-QA-2", now).kind).toBe("clear");
+
+    const again = await exec(ctx);
+    expect(again.text).toContain("No quota cooldowns");
+  });
+
+  it("thread `resume` clears a quota cooldown even when the issue is not paused", async () => {
+    const issue = makeIssue({ identifier: "THINK-903", state: "In Progress", labels: ["Claude"] });
+    const gateway = new FakeGateway([issue]);
+    const h = await enrolled(issue, createSteeringExecutors({ gateway, store, log }));
+    seedQuotaCooldown(issue.id, issue.identifier);
+    await typed(h, "resume");
+    expect(lastReply(h)).toContain("quota cooldown cleared");
+    expect(quotaResumeMarker(store, issue.id)).not.toBeNull();
+    expect(classifyQuota(store, issue.id, new Date()).kind).toBe("clear");
   });
 });

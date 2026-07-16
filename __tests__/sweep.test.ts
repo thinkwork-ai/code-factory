@@ -395,11 +395,11 @@ describe("quota routing in decideAction (AE8)", () => {
     if (action.kind === "wait") expect(action.reason).toMatch(/QuotaCooldown/);
   });
 
-  it("expired → escalate (block Needs User), not a retry", () => {
+  it("exhausted → escalate (block Needs User), not a retry", () => {
     const action = decideAction(base, {
       activeAttempt: null,
       hasChildIssues: false,
-      quota: { kind: "expired" },
+      quota: { kind: "exhausted" },
     });
     expect(action.kind).toBe("block");
     if (action.kind === "block") expect(action.label).toBe("Needs User");

@@ -591,20 +591,20 @@ describe("ceiling/quota escalation is resumable (operator override)", () => {
     ).toBeUndefined();
   });
 
-  it("quota expired, no override → escalates to Needs User", () => {
+  it("quota exhausted, no override → escalates to Needs User", () => {
     const action = decideAction(
       makeCandidate({
         identifier: "T-9",
         state: "Ready to Work",
         labels: ["Claude", "LFG"],
       }),
-      emptyView({ quota: { kind: "expired" } }),
+      emptyView({ quota: { kind: "exhausted" } }),
     );
     expect(action).toMatchObject({ kind: "block", label: "Needs User" });
-    expect((action as { reason: string }).reason).toMatch(/QuotaCooldown/);
+    expect((action as { reason: string }).reason).toMatch(/cooldown tier is exhausted/);
   });
 
-  it("quota expired but operator override (marker present, Needs User absent) → routes normally", () => {
+  it("quota exhausted but operator override (marker present, Needs User absent) → routes normally", () => {
     const action = decideAction(
       makeCandidate({
         identifier: "T-9",
@@ -612,7 +612,7 @@ describe("ceiling/quota escalation is resumable (operator override)", () => {
         labels: ["Claude", "LFG"],
         comments: [blockComment("T-9")],
       }),
-      emptyView({ quota: { kind: "expired" } }),
+      emptyView({ quota: { kind: "exhausted" } }),
     );
     expect(action).toMatchObject({
       kind: "launch",

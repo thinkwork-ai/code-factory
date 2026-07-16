@@ -210,6 +210,20 @@ export interface FactoryStore {
    * ended_at.
    */
   getLatestTerminalAttempt(issueId: string): AttemptRow | undefined;
+  /**
+   * The newest terminal attempts for an issue (any phase), newest first —
+   * used by the quota classifier to count a consecutive QuotaCooldown streak.
+   */
+  listRecentTerminalAttempts(issueId: string, limit: number): AttemptRow[];
+  /**
+   * Every issue whose NEWEST terminal attempt is `QuotaCooldown`, with that
+   * attempt's ended_at — the Slack `resume all` verb's work list.
+   */
+  listLatestQuotaCooldowns(): {
+    issue_id: string;
+    identifier: string;
+    ended_at: string | null;
+  }[];
 
   // ---- Leases (U6, R10/R11/R15) -----------------------------------------
   upsertLease(input: {
@@ -426,6 +440,15 @@ export function openStore(
   const getLatestTerminalAttemptStmt = db.prepare(
     "SELECT * FROM attempts WHERE issue_id = ? AND active = 0 ORDER BY id DESC LIMIT 1",
   );
+  const listRecentTerminalAttemptsStmt = db.prepare(
+    "SELECT * FROM attempts WHERE issue_id = ? AND active = 0 ORDER BY id DESC LIMIT ?",
+  );
+  const listLatestQuotaCooldownsStmt = db.prepare(`
+    SELECT a.issue_id, i.identifier, a.ended_at FROM attempts a
+    JOIN issues i ON i.issue_id = a.issue_id
+    WHERE a.active = 0 AND a.state = 'QuotaCooldown'
+      AND a.id = (SELECT MAX(id) FROM attempts WHERE issue_id = a.issue_id AND active = 0)
+  `);
 
   const upsertLeaseStmt = db.prepare(`
     INSERT INTO leases (issue_id, attempt_id, expires_at, heartbeat_at, sla_accumulated_ms)
@@ -597,6 +620,18 @@ export function openStore(
       return getLatestTerminalAttemptStmt.get(issueId) as
         | AttemptRow
         | undefined;
+    },
+
+    listRecentTerminalAttempts(issueId, limit) {
+      return listRecentTerminalAttemptsStmt.all(issueId, limit) as AttemptRow[];
+    },
+
+    listLatestQuotaCooldowns() {
+      return listLatestQuotaCooldownsStmt.all() as {
+        issue_id: string;
+        identifier: string;
+        ended_at: string | null;
+      }[];
     },
 
     upsertLease(input) {

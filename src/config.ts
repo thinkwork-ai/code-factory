@@ -147,6 +147,13 @@ export interface FactoryConfig {
   /** `deploy <name>` targets for the Slack console (THINK-286). */
   deployTargets?: Record<string, DeployTargetConfig>;
   /**
+   * Provider quota (rate-limit) handling. `cooldownMinutes` is the backoff
+   * tier table: the Nth consecutive QuotaCooldown waits cooldownMinutes[N-1]
+   * minutes and then retries; a streak beyond the last tier escalates to the
+   * operator instead. Default [5, 15, 30].
+   */
+  quota?: { cooldownMinutes?: number[] };
+  /**
    * Pass each phase's `budgetUsd` to the worker as `--max-budget-usd`. Default
    * false: subscription workers are governed by wall-clock SLA + stall
    * detection, not a dollar cap. Set true only on API-billed hosts where the
@@ -471,6 +478,19 @@ export function loadConfig(): FactoryConfig {
         : {}),
   };
 
+  // quota: tolerant parse — only positive finite numbers survive; an empty or
+  // absent list means "use the built-in default tiers".
+  let quota: FactoryConfig["quota"];
+  if (typeof raw.quota === "object" && raw.quota !== null) {
+    const quotaRaw = raw.quota as Record<string, unknown>;
+    if (Array.isArray(quotaRaw.cooldownMinutes)) {
+      const tiers = (quotaRaw.cooldownMinutes as unknown[])
+        .map(Number)
+        .filter((n) => Number.isFinite(n) && n > 0);
+      if (tiers.length > 0) quota = { cooldownMinutes: tiers };
+    }
+  }
+
   return {
     linear: {
       apiKey: linearRaw.apiKey as string,
@@ -484,6 +504,7 @@ export function loadConfig(): FactoryConfig {
     phases: mergePhases(raw.phases),
     pollIntervalSeconds,
     ...(deployTargets !== undefined ? { deployTargets } : {}),
+    ...(quota !== undefined ? { quota } : {}),
     enforceBudgetUsd: raw.enforceBudgetUsd === true,
   };
 }
