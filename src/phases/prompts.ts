@@ -473,9 +473,69 @@ function fillTemplate(
 }
 
 /**
+ * First non-blank line starts with a daemon marker prefix → factory
+ * machinery (ledger, batons, launch markers, preflight/block/lane-conflict,
+ * Slack-relay mirrors), never operator direction.
+ */
+const FACTORY_MARKER_RE =
+  /^(automation-ledger|handoff|dispatcher|factory-preflight|factory-block|factory-lane-conflict|slack-relay):/;
+
+function isFactoryMachineryComment(body: string): boolean {
+  const firstLine = (body.trimStart().split("\n", 1)[0] ?? "").trim();
+  return FACTORY_MARKER_RE.test(firstLine);
+}
+
+/** Bounds for the operator-context section (send-back comments). */
+const OPERATOR_CONTEXT_MAX_COMMENTS = 5;
+const OPERATOR_CONTEXT_MAX_CHARS = 4000;
+
+/**
+ * Operator comments posted AFTER the embedded baton, rendered as an
+ * authoritative "why was this phase (re)launched" section. This is the
+ * send-back path: an operator moves an issue back to an earlier status with
+ * a plain comment ("forgot to handle X") — without this section the worker
+ * launches from a baton that predates the send-back and can conclude the
+ * phase is already done. Trust mirrors baton discovery: with `trust` set,
+ * untrusted-author comments never reach the worker prompt (fail-open when
+ * absent, exactly as `findNewestBaton`).
+ */
+function buildOperatorContext(
+  existing: LinearCommentSnapshot | null,
+  comments: LinearCommentSnapshot[],
+  trust?: CommentTrust,
+): string | null {
+  if (existing === null) return null;
+  const batonIndex = comments.indexOf(existing);
+  if (batonIndex < 0) return null;
+  const newer = comments
+    .slice(batonIndex + 1)
+    .filter((c) => c.body.trim() !== "")
+    .filter((c) => !isFactoryMachineryComment(c.body))
+    .filter((c) => trust === undefined || isTrustedComment(c, trust));
+  const kept = newer.slice(-OPERATOR_CONTEXT_MAX_COMMENTS);
+  if (kept.length === 0) return null;
+  const quoted = kept.map((c) => {
+    const body = c.body.trim();
+    const bounded =
+      body.length > OPERATOR_CONTEXT_MAX_CHARS
+        ? `${body.slice(0, OPERATOR_CONTEXT_MAX_CHARS)}\n…(truncated)`
+        : body;
+    return `> ${bounded.replace(/\n/g, "\n> ")}`;
+  });
+  return [
+    "---",
+    "",
+    "Operator comments posted AFTER the handoff above (oldest first). These are why this phase was (re)launched — typically a send-back with corrections or follow-up scope. Treat them as authoritative direction that supersedes the handoff where they conflict:",
+    "",
+    quoted.join("\n\n"),
+  ].join("\n");
+}
+
+/**
  * Assemble the launch prompt for one phase: shared rules + filled template +
  * the newest matching baton verbatim (synthesized from the Progress document
- * when absent, per the routing contract).
+ * when absent, per the routing contract) + any trusted operator comments
+ * newer than that baton (send-back context).
  */
 export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
   const readStatus = PHASE_HANDOFF[input.phase].reads;
@@ -524,8 +584,16 @@ export function assemblePrompt(input: AssemblePromptInput): AssembledPrompt {
     .replaceAll("<OPERATOR_NAME>", project.operatorName)
     .replaceAll("<OPERATOR_HANDLE>", project.operatorLinearHandle);
 
+  // Appended after the baton and, like it, NEVER substituted — operator
+  // comment text is quoted verbatim.
+  const operatorContext = buildOperatorContext(
+    existing,
+    input.comments,
+    input.trust,
+  );
+
   return {
-    prompt: `${head}\n\n${baton}`,
+    prompt: `${head}\n\n${baton}${operatorContext !== null ? `\n\n${operatorContext}` : ""}`,
     baton,
     batonToPost: existing === null ? baton : null,
   };

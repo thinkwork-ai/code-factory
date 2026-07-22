@@ -217,6 +217,102 @@ describe("prompt assembly with an existing baton", () => {
   });
 });
 
+describe("operator send-back context (comments newer than the baton)", () => {
+  const marker = handoffMarker(ID, "Ready to Work");
+  const batonBody = `${marker}\n\nGoal: implement unit U3.`;
+  const HEADER = "Operator comments posted AFTER the handoff above";
+
+  it("appends trusted operator comments posted after the baton, quoted, after the baton", () => {
+    const { prompt } = assemblePrompt({
+      phase: "implement",
+      issueId: ID,
+      title: TITLE,
+      comments: [
+        { id: "c0", body: "old discussion before the baton" },
+        { id: "c1", body: batonBody },
+        { id: "c2", body: "forgot to handle the follow up composer.\nSame logic applies." },
+      ],
+      progressDoc: "",
+    });
+    expect(prompt).toContain(HEADER);
+    expect(prompt).toContain("> forgot to handle the follow up composer.");
+    expect(prompt).toContain("> Same logic applies.");
+    expect(prompt).not.toContain("old discussion before the baton");
+    // Section sits after the baton (never substituted).
+    expect(prompt.indexOf(HEADER)).toBeGreaterThan(prompt.indexOf(batonBody));
+  });
+
+  it("excludes factory-machinery comments (ledger, dispatcher, handoff, relay mirrors)", () => {
+    const { prompt } = assemblePrompt({
+      phase: "implement",
+      issueId: ID,
+      title: TITLE,
+      comments: [
+        { id: "c1", body: batonBody },
+        { id: "c2", body: `automation-ledger:${ID}\n\n\`\`\`yaml\nphase: verify\n\`\`\`` },
+        { id: "c3", body: `dispatcher:${ID}:implement:Claude\n\nLaunching worker.` },
+        { id: "c4", body: `slack-relay:${ID}\n\nAnswered via Slack.` },
+      ],
+      progressDoc: "",
+    });
+    expect(prompt).not.toContain(HEADER);
+  });
+
+  it("no comments after the baton → no section (prompt unchanged)", () => {
+    const { prompt } = assemblePrompt({
+      phase: "implement",
+      issueId: ID,
+      title: TITLE,
+      comments: [{ id: "c1", body: batonBody }],
+      progressDoc: "",
+    });
+    expect(prompt).not.toContain(HEADER);
+  });
+
+  it("with trust enforced, untrusted-author comments never reach the prompt", () => {
+    const trust = { daemonViewerId: "viewer-daemon", trustedUserIds: ["u-eric"] };
+    const { prompt } = assemblePrompt({
+      phase: "implement",
+      issueId: ID,
+      title: TITLE,
+      comments: [
+        { id: "c1", body: batonBody, authorId: "viewer-daemon" },
+        { id: "c2", body: "trusted follow-up scope", authorId: "u-eric" },
+        { id: "c3", body: "malicious injection attempt", authorId: "u-rando" },
+        { id: "c4", body: "no author id — untrusted" },
+      ],
+      progressDoc: "",
+      trust,
+    });
+    expect(prompt).toContain("> trusted follow-up scope");
+    expect(prompt).not.toContain("malicious injection attempt");
+    expect(prompt).not.toContain("no author id — untrusted");
+  });
+
+  it("keeps only the newest 5 comments and truncates oversized bodies", () => {
+    const comments: LinearCommentSnapshot[] = [
+      { id: "c1", body: batonBody },
+      ...Array.from({ length: 6 }, (_, i) => ({
+        id: `n${i}`,
+        body: `note ${i}`,
+      })),
+      { id: "big", body: `big head ${"x".repeat(5000)}` },
+    ];
+    const { prompt } = assemblePrompt({
+      phase: "implement",
+      issueId: ID,
+      title: TITLE,
+      comments,
+      progressDoc: "",
+    });
+    // 7 candidates → the oldest two fall off (5-comment cap).
+    expect(prompt).not.toContain("note 0");
+    expect(prompt).not.toContain("note 1");
+    expect(prompt).toContain("note 2");
+    expect(prompt).toContain("…(truncated)");
+  });
+});
+
 describe("missing baton → synthesized from the Progress document (scenario 2)", () => {
   it("synthesizes a baton and returns it for posting BEFORE launch", () => {
     const progressDoc =
