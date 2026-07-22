@@ -506,6 +506,58 @@ describe("block decisions", () => {
     expect(resumed.kind).toBe("launch");
   });
 
+  it("operator send-back overrides a stale wait blocker — status phase ≠ ledger phase relaunches", () => {
+    // Verify recorded `waiting-on-deploy`; operator moved the issue back to
+    // Ready to Work with follow-up scope. The verify-phase gate must not pin
+    // the issue — implement relaunches.
+    const sentBack = decideAction(
+      makeCandidate({
+        state: "Ready to Work",
+        labels: ["Claude", "LFG"],
+        ledger: { phase: "verify", blocker: "waiting-on-deploy" },
+      }),
+      emptyView({ deployWait: { cleared: false } }),
+    );
+    expect(sentBack.kind).toBe("launch");
+    expect((sentBack as { phase: string }).phase).toBe("implement");
+
+    // Same for a cross-issue dependency wait.
+    const depSentBack = decideAction(
+      makeCandidate({
+        state: "Ready to Work",
+        labels: ["Claude", "LFG"],
+        ledger: { phase: "verify", blocker: "waiting-on: THINK-9" },
+      }),
+      emptyView({
+        dependency: { identifier: "THINK-9", state: "Todo", done: false },
+      }),
+    );
+    expect(depSentBack.kind).toBe("launch");
+
+    // Status still at the recording phase → the gate binds as before.
+    const stillWaiting = decideAction(
+      makeCandidate({
+        state: "Verification",
+        labels: ["Claude", "LFG"],
+        ledger: { phase: "verify", blocker: "waiting-on-deploy" },
+      }),
+      emptyView({ deployWait: { cleared: false } }),
+    );
+    expect(stillWaiting.kind).toBe("wait");
+
+    // Unknown/legacy ledger phase → fail-safe: the gate binds (never a
+    // false resume off a ledger the factory can't interpret).
+    const legacy = decideAction(
+      makeCandidate({
+        state: "Verification",
+        labels: ["Claude", "LFG"],
+        ledger: { phase: "todo", blocker: "waiting-on-deploy" },
+      }),
+      emptyView({ deployWait: { cleared: false } }),
+    );
+    expect(legacy.kind).toBe("wait");
+  });
+
   it("block decisions are idempotent — same inputs, identical action", () => {
     const candidate = makeCandidate({
       state: "Ready to Work",

@@ -415,11 +415,26 @@ export function decideAction(
     };
   }
 
+  // Operator send-back override for wait blockers: `waiting-on: THINK-x` /
+  // `waiting-on-deploy` are recorded by a worker for the phase in
+  // `ledger.phase`, and a waiting issue PARKS at that phase's status. When the
+  // current status maps to a DIFFERENT launch phase, an operator moved the
+  // issue (e.g. Verification → Ready to Work to send follow-up scope back to
+  // implement) — the gate belongs to a phase the issue is no longer in and
+  // must not keep it pinned there. Skip both wait gates and fall through to
+  // the status table; the launch-time ledger write nulls the stale blocker.
+  // An unknown/legacy ledger phase never triggers this (fail-safe wait).
+  const statusPhase = phaseForStatus(issue.state);
+  const staleWaitBlocker =
+    statusPhase !== null &&
+    candidate.ledger.ledger.phase in PHASE_HANDOFF &&
+    statusPhase !== candidate.ledger.ledger.phase;
+
   // Cross-issue dependency wait (`waiting-on: THINK-x` ledger blocker): the
   // worker recorded a gate on another issue. Wait QUIETLY until the dependency
   // is Done, then fall through and relaunch — the resumed worker re-checks the
   // gate and clears the blocker. Never Needs User, never a Failed attempt.
-  if (!isDone && view.dependency != null && !view.dependency.done) {
+  if (!isDone && !staleWaitBlocker && view.dependency != null && !view.dependency.done) {
     return {
       kind: "wait",
       reason: `${id} is waiting on ${view.dependency.identifier} (currently ${view.dependency.state}) — resumes automatically when it reaches Done`,
@@ -433,7 +448,7 @@ export function decideAction(
   // re-checks the deployed build and clears the blocker. A missing checker
   // (view.deployWait null with the blocker set is normalized upstream) or an
   // uncleared gate both wait — never a Failed attempt, never Needs User.
-  if (!isDone && view.deployWait != null && !view.deployWait.cleared) {
+  if (!isDone && !staleWaitBlocker && view.deployWait != null && !view.deployWait.cleared) {
     return {
       kind: "wait",
       reason: `${id} is waiting on a release deploy (ledger blocker "waiting-on-deploy") — resumes automatically when a newer release tag's deploy run succeeds`,
